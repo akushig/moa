@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b0d10;
+  --fg: #e7eaee;
+  --muted: #8a93a0;
+  --accent: #4ade80;
+  --negative: #f87171;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+  font-feature-settings: "tnum";
+}

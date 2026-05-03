@@ -1,0 +1,14 @@
+{
+  "realestate": [
+    { "name": "전세 (예시)", "deposit_krw": 500000000, "loan_krw": 300000000, "as_of": "2026-05-01" }
+  ],
+  "negative_account": [
+    { "bank": "토스뱅크", "limit_krw": 50000000, "used_krw": 12000000, "as_of": "2026-05-01" }
+  ],
+  "loan": [
+    { "name": "주택담보대출", "principal_krw": 250000000, "balance_krw": 230000000, "interest_rate": 0.045, "as_of": "2026-05-01" }
+  ],
+  "cash": [
+    { "bank": "카카오뱅크", "balance_krw": 8000000, "as_of": "2026-05-01" }
+  ]
+}

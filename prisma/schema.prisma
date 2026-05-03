@@ -1,0 +1,35 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+// libSQL (Turso) is wire-compatible with SQLite — keep provider as sqlite,
+// connect via @prisma/adapter-libsql at runtime (lib/db.ts).
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// v0.1: enabled. v0.5+: price_snapshots / fx_rates 추가 활성화.
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  timestamp   DateTime
+  source      String   // exchange | manual | csv
+  exchange    String?  // upbit | bithumb | null
+  assetClass  String   // crypto | stock | cash | loan | realestate
+  assetSymbol String   // BTC, KRW, KOSPI:005930, ...
+  side        String   // buy | sell | deposit | withdraw | interest | dividend
+  qty         Decimal
+  price       Decimal
+  fee         Decimal  @default(0)
+  currency    String   // KRW, USD, ...
+  note        String?
+  createdAt   DateTime @default(now())
+
+  @@index([assetSymbol, timestamp])
+  @@index([source, exchange])
+}
+
+// v0.5+ enable
+// model PriceSnapshot { ... }
+// model FxRate { ... }
