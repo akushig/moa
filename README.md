@@ -8,7 +8,8 @@
 
 - **Hosting:** Vercel (Hobby tier, $0/월)
 - **DB:** [Turso](https://turso.tech) (libSQL, SQLite 호환) via Prisma `@prisma/adapter-libsql`
-- **거래소 키 보안:** read-only 권한 + Vercel env sensitive + private repo + strong basic auth + 90일 키 rotation. IP 화이트리스트는 한국 KYC 사용자 선택사항이라 미등록 (lib/proxy.ts 는 dormant — 추후 활성화 가능)
+- **Outbound static IP:** [Fixie](https://usefixie.com) 직접 가입 (무료 plan) — `FIXIE_URL` 환경변수 설정 시 [lib/proxy.ts](lib/proxy.ts) 가 자동으로 모든 outbound HTTP 를 Fixie 통해 라우팅. 거래소 (업비트/빗썸) 가 IP 화이트리스트 필수라 필요. Fixie 무료 plan limit 도달 시 paid plan 또는 Fly.io 마이그 검토.
+- **거래소 키 보안:** read-only 권한 + IP 화이트리스트 (Fixie static IPs) + Vercel env sensitive + private repo + strong basic auth + 90일 키 rotation
 - **App:** Next.js 16 App Router + Tailwind v4 + React 19
 - **Test:** Vitest 2 + decimal.js 정밀도
 - **Auth:** Next.js 16 `proxy.ts` + 단일 BASIC_AUTH_PASSWORD over HTTPS (Vercel 자동)
@@ -23,16 +24,24 @@
 npx vercel link        # 또는 Vercel 대시보드에서 GitHub repo 연결
 ```
 
-### 2. Marketplace integration (Vercel Storage → Turso)
+### 2. Turso 설치 (Vercel Storage → Marketplace)
 
-- **Turso** install → libSQL DB provisioning, Custom Prefix `TURSO` 로 설정 → `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 자동 등록
+- Vercel 대시보드 → Storage → Marketplace → Turso → Add Integration
+- moa 프로젝트 connect, Custom Prefix `TURSO` 로 설정 → `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 자동 등록
 
-### 3. 거래소 키 등록
+### 3. Fixie 직접 가입 (Vercel marketplace 우회)
+
+- [usefixie.com](https://usefixie.com) sign up → 무료 plan
+- 대시보드에서 `FIXIE_URL` 복사 (`http://fixie:<token>@<host>.usefixie.com:80` 형태)
+- **Outbound IPs** 메뉴에서 발급된 static IP 2개 확인 (업비트/빗썸 화이트리스트용)
+- Vercel project Settings → Environment Variables 에 `FIXIE_URL` 수기 등록
+
+### 4. 거래소 키 등록
 
 - 업비트: [open_api_management](https://upbit.com/mypage/open_api_management) 에서 read-only 키 발급
   - 권한: 자산 조회 ✅ / 주문 조회 ✅ (Day 3) / 출금 ❌ / 입금주소 조회 ❌
-  - **IP 등록 칸 비움** (한국 사용자 선택사항 — 미등록 시 모든 IP 허용)
-- 빗썸: 동일 패턴 (Day 2)
+  - **IP 등록 = Fixie static IP 2개** (Fixie 대시보드에서 복사)
+- 빗썸: 동일 패턴 (Day 2), 최대 5개 IP 한도
 
 ### 4. 환경변수 설정
 
