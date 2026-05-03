@@ -7,8 +7,8 @@
 ## Stack
 
 - **Hosting:** Vercel (Hobby tier, $0/월)
-- **Outbound static IP:** [Fixie](https://vercel.com/marketplace/fixie) (Vercel Marketplace integration, 무료 plan) — 거래소 화이트리스트용
 - **DB:** [Turso](https://turso.tech) (libSQL, SQLite 호환) via Prisma `@prisma/adapter-libsql`
+- **거래소 키 보안:** read-only 권한 + Vercel env sensitive + private repo + strong basic auth + 90일 키 rotation. IP 화이트리스트는 한국 KYC 사용자 선택사항이라 미등록 (lib/proxy.ts 는 dormant — 추후 활성화 가능)
 - **App:** Next.js 16 App Router + Tailwind v4 + React 19
 - **Test:** Vitest 2 + decimal.js 정밀도
 - **Auth:** Next.js 16 `proxy.ts` + 단일 BASIC_AUTH_PASSWORD over HTTPS (Vercel 자동)
@@ -23,16 +23,15 @@
 npx vercel link        # 또는 Vercel 대시보드에서 GitHub repo 연결
 ```
 
-### 2. Marketplace integrations (Vercel 대시보드 → Integrations)
+### 2. Marketplace integration (Vercel Storage → Turso)
 
-- **Turso** install → libSQL DB provisioning, `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 자동 등록
-- **Fixie** install → outbound proxy, `FIXIE_URL` 자동 등록 (또는 `HTTPS_PROXY`/`HTTP_PROXY`)
+- **Turso** install → libSQL DB provisioning, Custom Prefix `TURSO` 로 설정 → `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 자동 등록
 
 ### 3. 거래소 키 등록
 
 - 업비트: [open_api_management](https://upbit.com/mypage/open_api_management) 에서 read-only 키 발급
-  - 권한: 자산 조회 ✅ / 주문 조회 ✅ (Day 3) / 출금 ❌
-  - **IP 화이트리스트 = Fixie 가 표시한 static IPs** (Fixie 대시보드에서 확인 후 등록)
+  - 권한: 자산 조회 ✅ / 주문 조회 ✅ (Day 3) / 출금 ❌ / 입금주소 조회 ❌
+  - **IP 등록 칸 비움** (한국 사용자 선택사항 — 미등록 시 모든 IP 허용)
 - 빗썸: 동일 패턴 (Day 2)
 
 ### 4. 환경변수 설정
