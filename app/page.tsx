@@ -93,7 +93,13 @@ async function load() {
     })),
   );
 
-  return { exchanges, total, unpriced, cb, txCount: txs.length };
+  // 누적 실현손익 합계 (모든 (exchange, symbol) 의 realizedPnl 합)
+  const totalRealized = Array.from(cb.values()).reduce(
+    (acc, v) => acc.plus(v.realizedPnl),
+    new Decimal(0),
+  );
+
+  return { exchanges, total, unpriced, cb, txCount: txs.length, totalRealized };
 }
 
 export default async function Page() {
@@ -171,13 +177,20 @@ export default async function Page() {
     <main className="p-8 max-w-4xl mx-auto">
       <div className="flex items-baseline justify-between">
         <h1 className="text-sm text-[var(--muted)] uppercase tracking-wider">총자산</h1>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <a href="/asset" className="text-xs text-[var(--muted)] hover:text-white">
+            특정 시점 조회
+          </a>
           <SyncButton />
         </div>
       </div>
       <div className="mt-2 text-5xl font-semibold">{formatKrw(totalKrw)}</div>
       <div className="mt-2 text-xs text-[var(--muted)]">
-        최근 동기화: {lastSyncStr} · 거래내역 {r.txCount.toLocaleString('ko-KR')}건
+        최근 동기화: {lastSyncStr} · 거래내역 {r.txCount.toLocaleString('ko-KR')}건 · 누적 실현손익{' '}
+        <span className={r.totalRealized.gte(0) ? '' : 'text-[var(--negative)]'}>
+          {r.totalRealized.gte(0) ? '+' : ''}
+          {formatKrw(r.totalRealized)}
+        </span>
       </div>
 
       <table className="mt-10 w-full text-sm">
@@ -206,6 +219,7 @@ export default async function Page() {
                   <th className="text-right font-normal py-2">현재가</th>
                   <th className="text-right font-normal py-2">평가금액</th>
                   <th className="text-right font-normal py-2">평가손익</th>
+                  <th className="text-right font-normal py-2">실현손익</th>
                 </tr>
               </thead>
               <tbody>
@@ -261,6 +275,18 @@ export default async function Page() {
                                 {h.pct.toFixed(1)}%)
                               </span>
                             )}
+                          </>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td
+                        className={`py-2 text-right tabular-nums ${h.realizedPnl && h.realizedPnl.lt(0) ? 'text-[var(--negative)]' : ''}`}
+                      >
+                        {h.realizedPnl && !h.realizedPnl.eq(0) ? (
+                          <>
+                            {h.realizedPnl.gte(0) ? '+' : ''}
+                            {formatKrw(h.realizedPnl)}
                           </>
                         ) : (
                           '—'
