@@ -46,6 +46,7 @@ export async function POST() {
       crypto: binance.cryptoUsdt,
       holdingsCount: binance.holdingsCount,
       unpricedCount: binance.unpricedCount,
+      walletWarnings: binance.warnings ?? [],
       quoteCurrency: 'USDT',
     };
   } else if (binance.error && !binance.error.includes('not set')) {

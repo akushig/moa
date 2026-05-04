@@ -6,30 +6,12 @@
 //
 // 워커 측 worker/src/exchanges/binance.ts 와 같은 로직. 둘 다 별도 npm package
 // 라 코드 공유 안 됨 → 의도적 duplication.
-import crypto from 'node:crypto';
 import { Decimal } from '@/lib/decimal';
 import { prisma } from '@/lib/db';
-
-const BINANCE_API = 'https://api.binance.com';
+import { binanceAuthFetch as authFetch, BINANCE_API } from './binance-auth';
+import { getAllWalletPositions } from './binance-wallets';
 
 export type BinanceBalance = { asset: string; free: string; locked: string };
-
-function sign(secret: string, payload: string): string {
-  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
-}
-
-async function authFetch(path: string, query: Record<string, string> = {}): Promise<Response> {
-  const apiKey = process.env.BINANCE_API_KEY;
-  const secret = process.env.BINANCE_SECRET_KEY;
-  if (!apiKey || !secret) throw new Error('BINANCE_API_KEY / BINANCE_SECRET_KEY not set');
-  const q: Record<string, string> = { ...query, timestamp: String(Date.now()), recvWindow: '10000' };
-  const qs = new URLSearchParams(q).toString();
-  const signature = sign(secret, qs);
-  return fetch(`${BINANCE_API}${path}?${qs}&signature=${signature}`, {
-    headers: { 'X-MBX-APIKEY': apiKey },
-    cache: 'no-store',
-  });
-}
 
 const USDT_PARITY = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'DAI']);
 
@@ -41,6 +23,8 @@ export type BinanceHolding = {
   priceKrw: string | null; // 단위는 USDT
   valueKrw: string | null;
   source: 'krw_market' | 'usdt_market' | 'fx' | 'parity' | 'unpriced';
+  // spot/earn-flex/earn-locked/funding/loan-collateral 분포 (참고용, 합계=qty).
+  breakdown?: { source: string; qty: string }[];
 };
 
 export type BinanceSyncResult = {
@@ -50,6 +34,7 @@ export type BinanceSyncResult = {
   cryptoUsdt?: string;
   holdingsCount?: number;
   unpricedCount?: number;
+  warnings?: string[]; // wallet endpoint 부분 실패
   error?: string;
 };
 
@@ -58,21 +43,17 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
     return { ok: false, error: 'BINANCE_API_KEY/SECRET not set in Vercel env' };
   }
   try {
-    // 1) 잔고
-    const acctRes = await authFetch('/api/v3/account');
+    // 1) spot 잔고 + Earn(flex/locked) + Funding + Loan collateral + exchangeInfo 병렬
+    const [acctRes, exInfoRes, walletResult] = await Promise.all([
+      authFetch('/api/v3/account'),
+      fetch(`${BINANCE_API}/api/v3/exchangeInfo?permissions=SPOT`, { cache: 'no-store' }),
+      getAllWalletPositions(),
+    ]);
     if (!acctRes.ok) {
       throw new Error(`Binance /api/v3/account ${acctRes.status}: ${await acctRes.text()}`);
     }
-    const acct = (await acctRes.json()) as { balances: BinanceBalance[] };
-    const nonZero = (acct.balances ?? []).filter((b) =>
-      new Decimal(b.free).plus(b.locked).gt(0),
-    );
-
-    // 2) tradable USDT 페어
-    const exInfoRes = await fetch(`${BINANCE_API}/api/v3/exchangeInfo?permissions=SPOT`, {
-      cache: 'no-store',
-    });
     if (!exInfoRes.ok) throw new Error(`Binance exchangeInfo ${exInfoRes.status}`);
+    const acct = (await acctRes.json()) as { balances: BinanceBalance[] };
     const exInfo = (await exInfoRes.json()) as {
       symbols: { symbol: string; status: string }[];
     };
@@ -80,7 +61,27 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
       exInfo.symbols.filter((s) => s.status === 'TRADING').map((s) => s.symbol),
     );
 
-    // 3) ticker price 일괄 fetch
+    // asset → {qty, breakdown[]} 로 모든 wallet 합산.
+    const merged = new Map<string, { qty: Decimal; breakdown: { source: string; qty: string }[] }>();
+    const addPos = (asset: string, qty: Decimal, source: string) => {
+      if (qty.lte(0)) return;
+      const cur = merged.get(asset) ?? { qty: new Decimal(0), breakdown: [] };
+      cur.qty = cur.qty.plus(qty);
+      cur.breakdown.push({ source, qty: qty.toString() });
+      merged.set(asset, cur);
+    };
+    for (const b of acct.balances ?? []) {
+      addPos(b.asset, new Decimal(b.free).plus(b.locked), 'spot');
+    }
+    for (const p of walletResult.positions) {
+      addPos(p.asset, p.qty, p.source);
+    }
+    const nonZero: { asset: string; qty: Decimal; breakdown: { source: string; qty: string }[] }[] = [];
+    for (const [asset, v] of merged) {
+      if (v.qty.gt(0)) nonZero.push({ asset, qty: v.qty, breakdown: v.breakdown });
+    }
+
+    // 2) ticker price 일괄 fetch
     const cryptoSymbols: string[] = [];
     for (const b of nonZero) {
       if (USDT_PARITY.has(b.asset)) continue;
@@ -99,14 +100,14 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
       priceMap = new Map(arr.map((t) => [t.symbol, t.price]));
     }
 
-    // 4) breakdown
+    // 3) breakdown
     let cash = new Decimal(0);
     let crypto = new Decimal(0);
     const unpriced: { currency: string; balance: string }[] = [];
     const holdings: BinanceHolding[] = [];
 
     for (const b of nonZero) {
-      const qty = new Decimal(b.free).plus(b.locked);
+      const qty = b.qty;
       if (USDT_PARITY.has(b.asset)) {
         cash = cash.plus(qty);
         holdings.push({
@@ -117,6 +118,7 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
           priceKrw: '1',
           valueKrw: qty.toString(),
           source: 'parity',
+          breakdown: b.breakdown,
         });
         continue;
       }
@@ -132,6 +134,7 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
           priceKrw: null,
           valueKrw: null,
           source: 'unpriced',
+          breakdown: b.breakdown,
         });
         continue;
       }
@@ -145,13 +148,14 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
         priceKrw: new Decimal(price).toString(),
         valueKrw: value.toString(),
         source: 'usdt_market',
+        breakdown: b.breakdown,
       });
     }
 
     const total = cash.plus(crypto);
     const takenAt = new Date();
 
-    // 5) BalanceSnapshot insert
+    // 4) BalanceSnapshot insert
     await prisma.balanceSnapshot.create({
       data: {
         takenAt,
@@ -161,11 +165,11 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
         cashKrw: cash.toString(),
         cryptoKrw: crypto.toString(),
         unpricedJson: JSON.stringify(unpriced),
-        rawJson: JSON.stringify({ holdings }),
+        rawJson: JSON.stringify({ holdings, walletWarnings: walletResult.errors }),
       },
     });
 
-    // 6) PriceSnapshot insert (priced holdings 만)
+    // 5) PriceSnapshot insert (priced holdings 만)
     const priceRows = holdings
       .filter((h) => h.priceKrw && h.source === 'usdt_market')
       .map((h) => ({
@@ -185,8 +189,10 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
       cryptoUsdt: crypto.toString(),
       holdingsCount: holdings.length,
       unpricedCount: unpriced.length,
+      warnings: walletResult.errors,
     };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+

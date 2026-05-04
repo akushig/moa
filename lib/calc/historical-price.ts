@@ -1,14 +1,19 @@
-// Vercel 측 historical 가격 조회 (retroactive view 용).
-// 워커 측과 동일한 로직 — 단 Vercel 에서 직접 candle API 호출 (public, 무인증).
+// Vercel 측 historical 가격 조회 (retroactive view + binance deposit fair-value 용).
 //
 // 우선순위:
 //   1) PriceSnapshot 테이블 (이전 /sync 시점 가격, 1시간 이내 데이터 있으면 사용)
-//   2) Upbit/Bithumb /v1/candles/minutes/1 (1분봉)
-//   3) /v1/candles/days (일봉 종가) fallback
+//   2) Upbit/Bithumb /v1/candles/minutes/1, Binance /api/v3/klines (1m)
+//   3) Upbit/Bithumb /v1/candles/days fallback
+//
+// market 포맷:
+//   - upbit/bithumb: 'KRW-XYZ'
+//   - binance: 'USDT-XYZ'   (PriceSnapshot 측 컨벤션 동일)
 import { prisma } from '@/lib/db';
 import { Decimal } from '@/lib/decimal';
 
 const cache = new Map<string, string | null>();
+
+type Source = 'upbit' | 'bithumb' | 'binance';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -36,7 +41,7 @@ function fmtDayParam(source: 'upbit' | 'bithumb', timestampMs: number): string {
   return `${yyyy}-${mm}-${dd}T23:59:59`;
 }
 
-async function fetchCandle(
+async function fetchKrwCandle(
   source: 'upbit' | 'bithumb',
   path: '/v1/candles/minutes/1' | '/v1/candles/days',
   market: string,
@@ -61,9 +66,31 @@ async function fetchCandle(
   }
 }
 
-// PriceSnapshot 우선 조회 (1시간 이내 데이터). 없으면 candle API.
+// Binance public klines — 분봉 close 가격. symbol = 'XYZUSDT'.
+async function fetchBinanceKline(symbol: string, timestampMs: number): Promise<string | null> {
+  const startTime = Math.floor(timestampMs / 60_000) * 60_000;
+  const endTime = startTime + 60_000;
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&startTime=${startTime}&endTime=${endTime}&limit=1`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    if (!res.ok) return null;
+    const j = (await res.json()) as unknown;
+    if (!Array.isArray(j) || j.length === 0) return null;
+    // klines: [openTime, open, high, low, close, volume, ...]
+    const close = (j[0] as unknown[])[4];
+    if (typeof close !== 'string') return null;
+    return Number.isFinite(Number(close)) ? close : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function getHistoricalPriceAt(
-  source: 'upbit' | 'bithumb',
+  source: Source,
   market: string,
   timestampMs: number,
 ): Promise<Decimal | null> {
@@ -83,24 +110,44 @@ export async function getHistoricalPriceAt(
     }
   }
 
-  // 2) 1분봉 candle
+  if (source === 'binance') {
+    const dash = market.indexOf('-');
+    if (dash < 0) return null;
+    const quote = market.slice(0, dash);
+    const base = market.slice(dash + 1);
+    const symbol = `${base}${quote}`;
+    const cacheKey = `binance::${symbol}::1m::${Math.floor(timestampMs / 60_000) * 60_000}`;
+    if (!cache.has(cacheKey)) {
+      cache.set(cacheKey, await fetchBinanceKline(symbol, timestampMs));
+    }
+    const v = cache.get(cacheKey);
+    return v ? new Decimal(v) : null;
+  }
+
+  // upbit/bithumb
   const cacheKey = `${source}::${market}::1m::${Math.ceil(timestampMs / 60_000) * 60_000}`;
   if (!cache.has(cacheKey)) {
-    cache.set(cacheKey, await fetchCandle(source, '/v1/candles/minutes/1', market, fmtMinuteParam(source, timestampMs)));
+    cache.set(
+      cacheKey,
+      await fetchKrwCandle(source, '/v1/candles/minutes/1', market, fmtMinuteParam(source, timestampMs)),
+    );
   }
   const minute = cache.get(cacheKey);
   if (minute) return new Decimal(minute);
 
-  // 3) 일봉 fallback
   const dayKey = `${source}::${market}::1d::${fmtDayParam(source, timestampMs)}`;
   if (!cache.has(dayKey)) {
-    cache.set(dayKey, await fetchCandle(source, '/v1/candles/days', market, fmtDayParam(source, timestampMs)));
+    cache.set(
+      dayKey,
+      await fetchKrwCandle(source, '/v1/candles/days', market, fmtDayParam(source, timestampMs)),
+    );
   }
   const day = cache.get(dayKey);
   return day ? new Decimal(day) : null;
 }
 
-// 여러 holdings 의 가격을 동시 fetch (concurrency 8).
+// 여러 holdings 의 가격을 동시 fetch (concurrency 8). retroactive view 전용 —
+// upbit/bithumb 만 사용해서 source='upbit'|'bithumb' 시그니처 유지.
 export async function fetchPricesForHoldings(
   holdings: { exchange: string; symbol: string }[],
   asOfMs: number,
