@@ -56,13 +56,25 @@ describe('computeCostBasis (moving average, exchange-style)', () => {
     expect(r.realizedPnl.toString()).toBe('10000000');
   });
 
-  it('deposit does NOT affect avg or trackedQty (staking reward style)', () => {
+  it('deposit with price=0 does NOT affect avg (no historical price)', () => {
     const r = computeCostBasis([
       t(1, 'buy', '1', '50000000'),
       t(2, 'deposit', '1', '0'),
     ]);
-    expect(r.trackedQty.toString()).toBe('1'); // still 1 (deposit not counted)
-    expect(r.avgPrice.toString()).toBe('50000000'); // unchanged
+    expect(r.trackedQty.toString()).toBe('1');
+    expect(r.avgPrice.toString()).toBe('50000000');
+    expect(r.depositQty.toString()).toBe('1');
+  });
+
+  it('deposit with price>0 (fair-value) treated like buy → avg dilutes', () => {
+    // buy 1 BTC @ 50M, deposit 1 BTC @ 60M (시점 시장가). avg = 55M
+    const r = computeCostBasis([
+      t(1, 'buy', '1', '50000000'),
+      t(2, 'deposit', '1', '60000000'),
+    ]);
+    expect(r.trackedQty.toString()).toBe('2');
+    expect(r.cost.toString()).toBe('110000000');
+    expect(r.avgPrice.toString()).toBe('55000000');
     expect(r.depositQty.toString()).toBe('1');
   });
 

@@ -53,8 +53,13 @@ for (const [key, rows] of sorted) {
       const remain = trackedQty.minus(wQty);
       cost = cost.times(remain).div(trackedQty);
       trackedQty = remain;
+    } else if (t.side === 'deposit') {
+      // price>0 (시점 시장가) 면 buy 처럼 fair-value cost 가산. 0 이면 skip.
+      if (p.gt(0)) {
+        cost = cost.plus(q.times(p));
+        trackedQty = trackedQty.plus(q);
+      }
     }
-    // deposit: 변경 없음
   }
   const moaAvg = trackedQty.gt(0) ? cost.div(trackedQty) : null;
   const ex2 = exHoldings.get(key);

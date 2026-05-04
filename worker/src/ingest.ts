@@ -19,6 +19,7 @@ import {
   getLatestTransferTimestamp,
   type TransactionInput,
 } from './db.js';
+import { getDailyClosePrice } from './historical-prices.js';
 
 // closed order → Transaction row.
 // per-unit price = executed_funds / executed_volume (모든 ord_type 에서 정확).
@@ -51,29 +52,36 @@ function orderToTransaction(
 }
 
 // deposit/withdraw → Transaction row.
-//   - currency=KRW 는 cash flow 라 v0.1 에서는 skip (현금 추적 별도)
-//   - state 는 'DONE' / 'DEPOSIT_ACCEPTED' 만 (실제 자산 이동 완료)
-//   - withdraw 의 fee 는 코인 단위 (network fee). 거래소에서 빠진 총량 = amount + fee.
-//     평균단가 계산엔 영향 X (cost-basis 가 deposit/withdraw 별도 로직).
-//   - price = 0 (구매가 아님). fee 는 거래소 수수료 컬럼과 의미 다름 → note 에 코인 fee 기록.
-function transferToTransaction(
+//   - currency=KRW 는 cash flow 라 v0.1 에서는 skip
+//   - state: DONE / ACCEPTED / DEPOSIT_ACCEPTED 만 (자산 이동 완료)
+//   - withdraw qty = amount + network fee (거래소 잔고에서 빠진 총량). price=0.
+//     cost-basis 는 비례 차감하므로 price 무관.
+//   - deposit price = 그 시점 일봉 종가 (해당 거래소 KRW-XXX). 못 가져오면 0.
+//     cost-basis 가 price>0 일 때만 buy 처럼 cost 가산 → 거래소 staking 보상
+//     fair-value 정의와 일치해서 평균단가 매칭됨.
+async function transferToTransaction(
   t: UpbitTransfer | BithumbTransfer,
   exchange: 'upbit' | 'bithumb',
-): TransactionInput | null {
-  if (t.currency === 'KRW') return null; // cash flow 별도
-  // 자산 이동 완료된 것만:
-  //   - DONE: 빗썸 출금 / 업비트 출금 / 빗썸 일부 입금
-  //   - ACCEPTED: 업비트 입금 (deposit 의 default 종결 상태)
-  //   - DEPOSIT_ACCEPTED: 빗썸 staking 보상 입금 등
+): Promise<TransactionInput | null> {
+  if (t.currency === 'KRW') return null;
   const validStates = new Set(['DONE', 'ACCEPTED', 'DEPOSIT_ACCEPTED']);
   if (!validStates.has(t.state)) return null;
   const amount = new Decimal(t.amount ?? '0');
   if (amount.lte(0)) return null;
   const coinFee = new Decimal(t.fee ?? '0');
-  // 출금 시 거래소 잔고에서 빠진 총량 = amount + fee (네트워크 수수료)
   const qty = t.type === 'withdraw' ? amount.plus(coinFee) : amount;
+  const ts = new Date(t.created_at).getTime();
+
+  let price = '0';
+  if (t.type === 'deposit') {
+    const market = `KRW-${t.currency}`;
+    const histPrice = await getDailyClosePrice(exchange, market, ts);
+    if (histPrice) price = histPrice;
+    // null 이면 그대로 0 → cost-basis 측에서 trackedQty 변경 없이 skip 됨
+  }
+
   return {
-    timestamp: new Date(t.created_at).getTime(),
+    timestamp: ts,
     source: 'exchange',
     exchange,
     externalId: t.uuid,
@@ -81,8 +89,8 @@ function transferToTransaction(
     assetSymbol: t.currency,
     side: t.type === 'deposit' ? 'deposit' : 'withdraw',
     qty: qty.toString(),
-    price: '0',
-    fee: '0', // KRW fee 가 아니므로 0. 코인 fee 는 qty 에 흡수.
+    price,
+    fee: '0',
     currency: t.currency,
     note: `${t.type} ${t.net_type ?? ''}`.slice(0, 32) || null,
   };
@@ -140,7 +148,7 @@ async function ingest(
     ]);
     transfersFetched = deposits.length + withdraws.length;
     for (const d of [...deposits, ...withdraws]) {
-      const t = transferToTransaction(d, source);
+      const t = await transferToTransaction(d, source);
       if (t) all.push(t);
     }
   } catch (e) {

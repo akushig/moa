@@ -21,23 +21,25 @@ export type CostBasis = {
 
 const Z = new Decimal(0);
 
-// Moving-average 평균단가. 거래소 (업비트/빗썸) 표시 convention 과 일치하도록 조정:
+// Moving-average 평균단가. 거래소 (업비트/빗썸) 표시값과 정합:
 //
 //   buy:      cost      += qty × price            (fee 제외)
 //             trackedQty += qty
 //   sell:     realized  += qty × price - sellQty × avg - sellFee
 //             cost      *= (trackedQty - sellQty) / trackedQty
 //             trackedQty -= sellQty
-//   withdraw: cost      *= (trackedQty - wQty) / trackedQty   (qty 만큼 cost 비례 차감)
-//             trackedQty -= wQty                              (실현 손익 이벤트 X)
-//   deposit:  cost      변경 없음
-//             trackedQty 변경 없음
-//             depositQty += qty                  (참고용 카운터만)
+//   withdraw: cost      *= (trackedQty - wQty) / trackedQty
+//             trackedQty -= wQty                              (실현 X)
+//   deposit (price > 0, fair-value): buy 와 동일 처리
+//             cost      += qty × price            (deposit 시점 시장가)
+//             trackedQty += qty
+//             depositQty += qty                   (참고용)
+//   deposit (price = 0, historical 시세 못 가져온 경우): trackedQty/cost 변경 X
+//             depositQty 만 증가
 //
-// → 평균단가 = 매입 거래분에 대한 가중평균. staking 보상 등 외부 입금이 평균단가를
-//   희석하지 않음 (거래소 표시값과 정합).
-// → 실제 보유수량은 BalanceSnapshot 에서 별도로 가져옴 (deposit 도 반영된 진짜 잔고).
-//   여기서는 cost basis 기준 trackedQty 만 다룸.
+// → 빗썸/업비트 같은 거래소들은 staking 보상도 fair-value 로 cost 부여 →
+//   moa 도 deposit 시점 일봉 종가로 cost 가산해서 정의 통일.
+// → 실제 보유 qty 는 BalanceSnapshot 에서 가져옴. trackedQty 는 cost basis 분모.
 export function computeCostBasis(txs: TxRow[]): CostBasis {
   const sorted = [...txs].sort((a, b) => {
     const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : Number(a.timestamp);
@@ -81,7 +83,12 @@ export function computeCostBasis(txs: TxRow[]): CostBasis {
       trackedQty = remain;
     } else if (t.side === 'deposit') {
       depositQty = depositQty.plus(q);
-      // cost / trackedQty 변경 없음 — 외부 입금은 평균단가에 영향 X
+      if (p.gt(0)) {
+        // 시점 시장가가 있으면 fair-value 로 cost 가산 (= 거래소 알고리즘 매치)
+        cost = cost.plus(q.times(p));
+        trackedQty = trackedQty.plus(q);
+      }
+      // price=0 이면 cost-basis 영향 X (historical price 미보유 = airdrop 등 KRW 마켓 없는 케이스)
     }
     // interest / dividend 등은 평균단가 영향 X
   }
