@@ -47,6 +47,30 @@ model Transaction {
   @@index([source, exchange])
 }
 
-// v0.5+ enable
-// model PriceSnapshot { ... }
-// model FxRate { ... }
+// 시점별 자산 가치 평가 + 멀티 거래소 / 외환 통합용. /sync 시 매번 보유
+// 코인의 현재가가 1행씩 박힘. 미래에 "2024-06-01 시점 자산" 같은 retro 쿼리는
+// (a) 그 시점 이전 transactions 으로 holdings 복원 (b) 그 시점 PriceSnapshot
+// 으로 평가, 형태로 동작.
+model PriceSnapshot {
+  id      Int      @id @default(autoincrement())
+  takenAt DateTime
+  market  String   // KRW-BTC, USDT-BTC (Binance), USD-BTC 등
+  price   Decimal
+  source  String   // upbit | bithumb | binance | mexc | manual
+
+  @@index([market, takenAt])
+  @@index([source, takenAt])
+}
+
+// USD/KRW 같은 환율 history. fx fetch 마다 캐시 hit 가 아닐 때 1행씩.
+// Binance/MEXC USDT 자산을 KRW 환산할 때 시점 환율 조회용.
+model FxRate {
+  id      Int      @id @default(autoincrement())
+  takenAt DateTime
+  base    String   // USD, USDT
+  quote   String   // KRW
+  rate    Decimal
+  source  String   // bok | frankfurter | exchange-derived
+
+  @@index([base, quote, takenAt])
+}

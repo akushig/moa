@@ -122,6 +122,8 @@ export default async function Page() {
   const haveAnySnapshot = r.exchanges.length > 0;
 
   // (exchange, symbol) → 보유 holding + cost basis 결합
+  // moaAvg = Transaction 기반 이동평균 (deposit 제외, withdraw 비례차감)
+  // exchangeAvg = 거래소가 알려주는 avg_buy_price (참고용)
   const holdingRows = r.exchanges.flatMap((e) =>
     e.holdings
       .filter((h) => new Decimal(h.qty).gt(0))
@@ -129,9 +131,11 @@ export default async function Page() {
         const cb = r.cb.get(`${e.exchange}::${h.currency}`);
         const priceKrw = h.priceKrw ? new Decimal(h.priceKrw) : null;
         const valueKrw = h.valueKrw ? new Decimal(h.valueKrw) : null;
-        const avgFromTx = cb && cb.qty.gt(0) ? cb.avgPrice : null;
-        const avgFromExchange = h.avgBuyPrice ? new Decimal(h.avgBuyPrice) : null;
-        const avgPrice = avgFromTx ?? avgFromExchange;
+        const moaAvg = cb && cb.trackedQty.gt(0) ? cb.avgPrice : null;
+        const exchangeAvgRaw = h.avgBuyPrice ? new Decimal(h.avgBuyPrice) : null;
+        const exchangeAvg = exchangeAvgRaw && exchangeAvgRaw.gt(0) ? exchangeAvgRaw : null;
+        // 표시용 평균단가: moa 우선, 없으면 거래소
+        const avgPrice = moaAvg ?? exchangeAvg;
         const costBasis = avgPrice && new Decimal(h.qty).gt(0)
           ? avgPrice.times(h.qty)
           : null;
@@ -145,8 +149,9 @@ export default async function Page() {
           qty: h.qty,
           priceKrw,
           valueKrw,
+          moaAvg,
+          exchangeAvg,
           avgPrice,
-          avgFromTx: avgFromTx !== null,
           costBasis,
           unrealized,
           pct,
@@ -196,64 +201,80 @@ export default async function Page() {
                   <th className="text-left font-normal py-2">거래소</th>
                   <th className="text-left font-normal py-2">코인</th>
                   <th className="text-right font-normal py-2">수량</th>
-                  <th className="text-right font-normal py-2">평균단가</th>
+                  <th className="text-right font-normal py-2">moa 평균</th>
+                  <th className="text-right font-normal py-2">거래소 평균</th>
                   <th className="text-right font-normal py-2">현재가</th>
                   <th className="text-right font-normal py-2">평가금액</th>
                   <th className="text-right font-normal py-2">평가손익</th>
                 </tr>
               </thead>
               <tbody>
-                {holdingRows.map((h, i) => (
-                  <tr key={`${h.exchange}-${h.currency}-${i}`} className="border-b border-white/5">
-                    <td className="py-2 text-[var(--muted)]">{h.exchange}</td>
-                    <td className="py-2">
-                      {h.currency}
-                      {h.source === 'fx' && (
-                        <span className="ml-1 text-[10px] text-[var(--muted)]">fx</span>
-                      )}
-                      {h.source === 'unpriced' && (
-                        <span className="ml-1 text-[10px] text-[var(--negative)]">미환산</span>
-                      )}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">{trimQty(h.qty)}</td>
-                    <td className="py-2 text-right tabular-nums">
-                      {h.avgPrice ? formatKrw(h.avgPrice) : '—'}
-                      {h.avgFromTx ? null : (
-                        <span className="ml-1 text-[10px] text-[var(--muted)]">e</span>
-                      )}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">
-                      {h.priceKrw ? formatKrw(h.priceKrw) : '—'}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">
-                      {h.valueKrw ? formatKrw(h.valueKrw) : '—'}
-                    </td>
-                    <td
-                      className={`py-2 text-right tabular-nums ${h.unrealized && h.unrealized.lt(0) ? 'text-[var(--negative)]' : ''}`}
-                    >
-                      {h.unrealized ? (
-                        <>
-                          {h.unrealized.gte(0) ? '+' : ''}
-                          {formatKrw(h.unrealized)}
-                          {h.pct && (
-                            <span className="ml-1 text-[10px]">
-                              ({h.pct.gte(0) ? '+' : ''}
-                              {h.pct.toFixed(1)}%)
-                            </span>
-                          )}
-                        </>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {holdingRows.map((h, i) => {
+                  const diff =
+                    h.moaAvg && h.exchangeAvg && h.exchangeAvg.gt(0)
+                      ? h.moaAvg.minus(h.exchangeAvg).div(h.exchangeAvg).times(100)
+                      : null;
+                  return (
+                    <tr key={`${h.exchange}-${h.currency}-${i}`} className="border-b border-white/5">
+                      <td className="py-2 text-[var(--muted)]">{h.exchange}</td>
+                      <td className="py-2">
+                        {h.currency}
+                        {h.source === 'fx' && (
+                          <span className="ml-1 text-[10px] text-[var(--muted)]">fx</span>
+                        )}
+                        {h.source === 'unpriced' && (
+                          <span className="ml-1 text-[10px] text-[var(--negative)]">미환산</span>
+                        )}
+                      </td>
+                      <td className="py-2 text-right tabular-nums">{trimQty(h.qty)}</td>
+                      <td className="py-2 text-right tabular-nums">
+                        {h.moaAvg ? formatKrw(h.moaAvg) : '—'}
+                        {diff && diff.abs().gte(1) && (
+                          <span
+                            className={`ml-1 text-[10px] ${diff.lt(0) ? 'text-[var(--negative)]' : 'text-[var(--muted)]'}`}
+                            title={`거래소 대비 ${diff.toFixed(1)}%`}
+                          >
+                            ({diff.gte(0) ? '+' : ''}
+                            {diff.toFixed(1)}%)
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 text-right tabular-nums text-[var(--muted)]">
+                        {h.exchangeAvg ? formatKrw(h.exchangeAvg) : '—'}
+                      </td>
+                      <td className="py-2 text-right tabular-nums">
+                        {h.priceKrw ? formatKrw(h.priceKrw) : '—'}
+                      </td>
+                      <td className="py-2 text-right tabular-nums">
+                        {h.valueKrw ? formatKrw(h.valueKrw) : '—'}
+                      </td>
+                      <td
+                        className={`py-2 text-right tabular-nums ${h.unrealized && h.unrealized.lt(0) ? 'text-[var(--negative)]' : ''}`}
+                      >
+                        {h.unrealized ? (
+                          <>
+                            {h.unrealized.gte(0) ? '+' : ''}
+                            {formatKrw(h.unrealized)}
+                            {h.pct && (
+                              <span className="ml-1 text-[10px]">
+                                ({h.pct.gte(0) ? '+' : ''}
+                                {h.pct.toFixed(1)}%)
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             <p className="mt-2 text-[10px] text-[var(--muted)]">
-              평균단가 표시: 거래내역(Transaction) 기반 이동평균 우선. 거래내역 미적재 코인은
-              거래소 측 avg_buy_price 사용 (<span className="font-mono">e</span> 표시).
-              fx = stablecoin 환산 (BoK / Frankfurter).
+              <span className="font-mono">moa 평균</span> = 거래내역(매수/매도/출금) 기반 이동평균. 입금(staking 보상 등)은 평균단가 제외 (거래소 convention).{' '}
+              <span className="font-mono">거래소 평균</span> = 거래소 API avg_buy_price (참고).{' '}
+              <span className="font-mono">fx</span> = stablecoin 환산.
             </p>
           </div>
         </section>

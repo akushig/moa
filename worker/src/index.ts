@@ -3,7 +3,12 @@ import { serve } from '@hono/node-server';
 import { timingSafeEqual } from 'node:crypto';
 import { getUpbitKrwBreakdown } from './exchanges/upbit.js';
 import { getBithumbKrwBreakdown } from './exchanges/bithumb.js';
-import { insertSnapshot } from './db.js';
+import {
+  insertSnapshot,
+  insertPriceSnapshots,
+  insertFxRate,
+  type PriceSnapshotInput,
+} from './db.js';
 import { ingestUpbit, ingestBithumb } from './ingest.js';
 
 const PORT = Number(process.env.PORT ?? '8080');
@@ -30,6 +35,10 @@ app.post('/sync', async (c) => {
   const results: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
 
+  // 동일 takenAt 으로 모든 거래소 PriceSnapshot 를 묶음 (시점 정합성)
+  const syncTime = Date.now();
+  const priceSnapshots: PriceSnapshotInput[] = [];
+
   await Promise.all([
     (async () => {
       try {
@@ -42,6 +51,15 @@ app.post('/sync', async (c) => {
           unpriced: r.unpriced,
           raw: { holdings: r.holdings },
         });
+        for (const h of r.holdings) {
+          if (h.priceKrw) {
+            priceSnapshots.push({
+              market: `KRW-${h.currency}`,
+              price: h.priceKrw,
+              source: 'upbit',
+            });
+          }
+        }
         results.upbit = {
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
@@ -64,6 +82,15 @@ app.post('/sync', async (c) => {
           unpriced: r.unpriced,
           raw: { holdings: r.holdings },
         });
+        for (const h of r.holdings) {
+          if (h.priceKrw) {
+            priceSnapshots.push({
+              market: `KRW-${h.currency}`,
+              price: h.priceKrw,
+              source: 'bithumb',
+            });
+          }
+        }
         results.bithumb = {
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
@@ -76,6 +103,27 @@ app.post('/sync', async (c) => {
       }
     })(),
   ]);
+
+  // PriceSnapshot 일괄 적재 (동일 takenAt)
+  if (priceSnapshots.length > 0) {
+    try {
+      await insertPriceSnapshots(syncTime, priceSnapshots);
+    } catch (e) {
+      errors.price_history = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // fx 가 holdings 환산 시 호출되었으면 캐시에 USD/KRW rate 가 있음 → FxRate 에도 기록
+  try {
+    const { getUsdKrwRateWithMeta } = await import('./fx.js');
+    const fx = await getUsdKrwRateWithMeta();
+    if (!fx.cached) {
+      // 새로 fetch 된 경우만 (캐시 hit 면 이미 이전 sync 에서 기록됨)
+      await insertFxRate(syncTime, 'USD', 'KRW', fx.rate.toString(), fx.source);
+    }
+  } catch {
+    // fx 미사용/실패 시 무시 — sync 본 작업과 무관
+  }
 
   const took = Date.now() - startedAt;
   const ok = Object.keys(results).length > 0 && Object.keys(errors).length === 0;

@@ -9,39 +9,49 @@ export type TxRow = {
 };
 
 export type CostBasis = {
-  qty: Decimal; // 현재 보유 수량
-  cost: Decimal; // 보유분의 누적 KRW 매입 비용 (수수료 포함)
-  avgPrice: Decimal; // cost / qty (qty=0 → 0)
-  realizedPnl: Decimal; // 누적 실현 손익 (KRW)
+  trackedQty: Decimal; // cost basis 의 분모. 매수만 카운트 (deposit 제외).
+  cost: Decimal; // 누적 매입 KRW (수수료 제외)
+  avgPrice: Decimal; // cost / trackedQty (trackedQty=0 → 0)
+  realizedPnl: Decimal; // 누적 실현 손익
   buyCount: number;
   sellCount: number;
+  depositQty: Decimal; // staking 보상 등 외부 입금 누적 (참고용)
+  withdrawQty: Decimal; // 외부 출금 누적 (참고용)
 };
 
 const Z = new Decimal(0);
 
-// Moving-average (이동평균) 평균단가. 거래소 (업비트/빗썸) 표시 convention 과 동일:
-// 매입 수수료는 평균단가에 포함하지 않음 (사용자가 화면에서 보는 "매수평균가" 와 일치).
-//   buy:  cost  += qty × price       ← fee 제외
-//         qty   += qty
-//   sell: realized += (price × qty) - (avg × qty) - sellFee
-//         cost  *= (qty - sellQty) / qty
-//         qty   -= sellQty
-// deposit/withdraw 는 평균단가 변경하지 않음 (입출고 = 외부 이벤트).
-//   - deposit: qty += qty (cost 0 으로 — v0.5+ 에서 시점 price 로 mark 옵션 추가)
-//   - withdraw: qty -= qty, cost 비례 감소.
+// Moving-average 평균단가. 거래소 (업비트/빗썸) 표시 convention 과 일치하도록 조정:
+//
+//   buy:      cost      += qty × price            (fee 제외)
+//             trackedQty += qty
+//   sell:     realized  += qty × price - sellQty × avg - sellFee
+//             cost      *= (trackedQty - sellQty) / trackedQty
+//             trackedQty -= sellQty
+//   withdraw: cost      *= (trackedQty - wQty) / trackedQty   (qty 만큼 cost 비례 차감)
+//             trackedQty -= wQty                              (실현 손익 이벤트 X)
+//   deposit:  cost      변경 없음
+//             trackedQty 변경 없음
+//             depositQty += qty                  (참고용 카운터만)
+//
+// → 평균단가 = 매입 거래분에 대한 가중평균. staking 보상 등 외부 입금이 평균단가를
+//   희석하지 않음 (거래소 표시값과 정합).
+// → 실제 보유수량은 BalanceSnapshot 에서 별도로 가져옴 (deposit 도 반영된 진짜 잔고).
+//   여기서는 cost basis 기준 trackedQty 만 다룸.
 export function computeCostBasis(txs: TxRow[]): CostBasis {
-  // sort ascending by timestamp
   const sorted = [...txs].sort((a, b) => {
     const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : Number(a.timestamp);
     const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : Number(b.timestamp);
     return ta - tb;
   });
 
-  let qty = Z;
+  let trackedQty = Z;
   let cost = Z;
   let realized = Z;
   let buyCount = 0;
   let sellCount = 0;
+  let depositQty = Z;
+  let withdrawQty = Z;
 
   for (const t of sorted) {
     const q = new Decimal(t.qty.toString());
@@ -51,36 +61,42 @@ export function computeCostBasis(txs: TxRow[]): CostBasis {
 
     if (t.side === 'buy') {
       cost = cost.plus(q.times(p));
-      qty = qty.plus(q);
+      trackedQty = trackedQty.plus(q);
       buyCount += 1;
     } else if (t.side === 'sell') {
       sellCount += 1;
-      if (qty.lte(0)) {
-        // short / 데이터 누락. 부호 안 맞으면 이번 거래 무시 (fallback).
-        continue;
-      }
-      const sellQty = Decimal.min(q, qty);
-      const avg = qty.gt(0) ? cost.div(qty) : Z;
+      if (trackedQty.lte(0)) continue;
+      const sellQty = Decimal.min(q, trackedQty);
+      const avg = trackedQty.gt(0) ? cost.div(trackedQty) : Z;
       realized = realized.plus(sellQty.times(p)).minus(sellQty.times(avg)).minus(f);
-      const remain = qty.minus(sellQty);
-      cost = qty.gt(0) ? cost.times(remain).div(qty) : Z;
-      qty = remain;
-    } else if (t.side === 'deposit') {
-      qty = qty.plus(q);
-      // cost 는 모름 → 0 처리 (보수적). 평균단가 ↓ 위험 — 메모리 노트 참고.
+      const remain = trackedQty.minus(sellQty);
+      cost = trackedQty.gt(0) ? cost.times(remain).div(trackedQty) : Z;
+      trackedQty = remain;
     } else if (t.side === 'withdraw') {
-      if (qty.gt(0)) {
-        const wq = Decimal.min(q, qty);
-        const remain = qty.minus(wq);
-        cost = cost.times(remain).div(qty);
-        qty = remain;
-      }
+      withdrawQty = withdrawQty.plus(q);
+      if (trackedQty.lte(0)) continue;
+      const wQty = Decimal.min(q, trackedQty);
+      const remain = trackedQty.minus(wQty);
+      cost = trackedQty.gt(0) ? cost.times(remain).div(trackedQty) : Z;
+      trackedQty = remain;
+    } else if (t.side === 'deposit') {
+      depositQty = depositQty.plus(q);
+      // cost / trackedQty 변경 없음 — 외부 입금은 평균단가에 영향 X
     }
     // interest / dividend 등은 평균단가 영향 X
   }
 
-  const avgPrice = qty.gt(0) ? cost.div(qty) : Z;
-  return { qty, cost, avgPrice, realizedPnl: realized, buyCount, sellCount };
+  const avgPrice = trackedQty.gt(0) ? cost.div(trackedQty) : Z;
+  return {
+    trackedQty,
+    cost,
+    avgPrice,
+    realizedPnl: realized,
+    buyCount,
+    sellCount,
+    depositQty,
+    withdrawQty,
+  };
 }
 
 // 여러 (exchange, symbol) 별로 그룹핑 → 각 그룹별 cost basis 반환.

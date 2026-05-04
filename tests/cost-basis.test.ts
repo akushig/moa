@@ -9,44 +9,41 @@ const t = (
   fee = '0',
 ) => ({ timestamp: ts, side, qty, price, fee });
 
-describe('computeCostBasis (moving average)', () => {
-  it('single buy → avg = price (fee NOT included in cost — exchange convention)', () => {
+describe('computeCostBasis (moving average, exchange-style)', () => {
+  it('single buy → avg = price (fee NOT included in cost)', () => {
     const r = computeCostBasis([t(1, 'buy', '0.5', '50000000', '12500')]);
-    expect(r.qty.toString()).toBe('0.5');
+    expect(r.trackedQty.toString()).toBe('0.5');
     expect(r.cost.toString()).toBe('25000000');
     expect(r.avgPrice.toString()).toBe('50000000');
     expect(r.realizedPnl.toString()).toBe('0');
   });
 
   it('two buys at different prices → weighted average', () => {
-    // 0.5 BTC @ 50M + 0.5 BTC @ 70M, fee 0 → avg = 60M
     const r = computeCostBasis([
       t(1, 'buy', '0.5', '50000000'),
       t(2, 'buy', '0.5', '70000000'),
     ]);
-    expect(r.qty.toString()).toBe('1');
+    expect(r.trackedQty.toString()).toBe('1');
     expect(r.avgPrice.toString()).toBe('60000000');
   });
 
   it('buy then sell → avg unchanged on remaining qty, realized pnl computed', () => {
-    // buy 1 @ 50M, sell 0.5 @ 70M
     const r = computeCostBasis([
       t(1, 'buy', '1', '50000000'),
       t(2, 'sell', '0.5', '70000000'),
     ]);
-    expect(r.qty.toString()).toBe('0.5');
-    expect(r.avgPrice.toString()).toBe('50000000'); // 평균단가 유지
+    expect(r.trackedQty.toString()).toBe('0.5');
+    expect(r.avgPrice.toString()).toBe('50000000');
     // realized = (70M - 50M) × 0.5 = 10M
     expect(r.realizedPnl.toString()).toBe('10000000');
   });
 
-  it('sell more than held → caps at held qty (data inconsistency fallback)', () => {
+  it('sell more than tracked → caps at tracked qty', () => {
     const r = computeCostBasis([
       t(1, 'buy', '0.5', '50000000'),
       t(2, 'sell', '1', '60000000'),
     ]);
-    expect(r.qty.toString()).toBe('0');
-    // realized = (60M - 50M) × 0.5 = 5M
+    expect(r.trackedQty.toString()).toBe('0');
     expect(r.realizedPnl.toString()).toBe('5000000');
   });
 
@@ -55,23 +52,36 @@ describe('computeCostBasis (moving average)', () => {
       t(2, 'sell', '0.5', '70000000'),
       t(1, 'buy', '1', '50000000'),
     ]);
-    expect(r.qty.toString()).toBe('0.5');
+    expect(r.trackedQty.toString()).toBe('0.5');
     expect(r.realizedPnl.toString()).toBe('10000000');
   });
 
-  it('deposit increases qty without affecting cost (treated as 0-cost)', () => {
+  it('deposit does NOT affect avg or trackedQty (staking reward style)', () => {
     const r = computeCostBasis([
       t(1, 'buy', '1', '50000000'),
       t(2, 'deposit', '1', '0'),
     ]);
-    expect(r.qty.toString()).toBe('2');
-    // cost stays 50M → avg = 25M (희석)
-    expect(r.avgPrice.toString()).toBe('25000000');
+    expect(r.trackedQty.toString()).toBe('1'); // still 1 (deposit not counted)
+    expect(r.avgPrice.toString()).toBe('50000000'); // unchanged
+    expect(r.depositQty.toString()).toBe('1');
+  });
+
+  it('withdraw reduces cost proportionally + trackedQty (no realized event)', () => {
+    // buy 1 BTC @ 50M (cost=50M), withdraw 0.5 BTC → trackedQty=0.5, cost=25M, avg=50M
+    const r = computeCostBasis([
+      t(1, 'buy', '1', '50000000'),
+      t(2, 'withdraw', '0.5', '0'),
+    ]);
+    expect(r.trackedQty.toString()).toBe('0.5');
+    expect(r.avgPrice.toString()).toBe('50000000'); // proportional → avg unchanged
+    expect(r.cost.toString()).toBe('25000000');
+    expect(r.withdrawQty.toString()).toBe('0.5');
+    expect(r.realizedPnl.toString()).toBe('0'); // withdrawal is not a realization
   });
 
   it('zero-qty rows ignored', () => {
     const r = computeCostBasis([t(1, 'buy', '0', '50000000')]);
-    expect(r.qty.toString()).toBe('0');
+    expect(r.trackedQty.toString()).toBe('0');
     expect(r.avgPrice.toString()).toBe('0');
   });
 });

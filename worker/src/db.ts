@@ -94,13 +94,68 @@ export async function getLatestOrderTimestamp(
   exchange: 'upbit' | 'bithumb',
   assetSymbol: string,
 ): Promise<number | null> {
-  const r = await db.execute({
-    sql: `SELECT MAX(timestamp) AS ts FROM "Transaction"
-          WHERE source = 'exchange' AND exchange = ? AND assetSymbol = ?`,
-    args: [exchange, assetSymbol],
-  });
+  return latestTimestamp(exchange, assetSymbol, ['buy', 'sell']);
+}
+
+// (exchange) 별 마지막 deposit/withdraw timestamp. transfers 는 currency 단위 단일
+// API 라 코인별 since 보다는 전체 since 가 더 단순. 안전 마진 1시간 overlap 으로
+// fetcher 가 cover.
+export async function getLatestTransferTimestamp(
+  exchange: 'upbit' | 'bithumb',
+): Promise<number | null> {
+  return latestTimestamp(exchange, null, ['deposit', 'withdraw']);
+}
+
+async function latestTimestamp(
+  exchange: string,
+  assetSymbol: string | null,
+  sides: string[],
+): Promise<number | null> {
+  const placeholders = sides.map(() => '?').join(', ');
+  const sql = `SELECT MAX(timestamp) AS ts FROM "Transaction"
+               WHERE source = 'exchange' AND exchange = ?
+                 ${assetSymbol ? 'AND assetSymbol = ?' : ''}
+                 AND side IN (${placeholders})`;
+  const args: (string | number)[] = [exchange];
+  if (assetSymbol) args.push(assetSymbol);
+  args.push(...sides);
+  const r = await db.execute({ sql, args });
   const v = r.rows[0]?.ts as unknown;
   if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+export type PriceSnapshotInput = {
+  market: string; // KRW-BTC, USDT-BTC
+  price: string;
+  source: string; // upbit | bithumb | binance ...
+};
+
+// /sync 시 holdings 의 현재가들을 1행씩 PriceSnapshot 에 적재. 시점별 자산
+// 평가의 raw material. 동일 takenAt 으로 묶어 batch insert.
+export async function insertPriceSnapshots(
+  takenAt: number,
+  rows: PriceSnapshotInput[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  for (const r of rows) {
+    await db.execute({
+      sql: `INSERT INTO "PriceSnapshot" (takenAt, market, price, source) VALUES (?, ?, ?, ?)`,
+      args: [takenAt, r.market, r.price, r.source],
+    });
+  }
+}
+
+export async function insertFxRate(
+  takenAt: number,
+  base: string,
+  quote: string,
+  rate: string,
+  source: string,
+): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO "FxRate" (takenAt, base, quote, rate, source) VALUES (?, ?, ?, ?, ?)`,
+    args: [takenAt, base, quote, rate, source],
+  });
 }

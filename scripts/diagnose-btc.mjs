@@ -12,8 +12,9 @@ for (const ex of ['upbit', 'bithumb']) {
           ORDER BY timestamp ASC`,
     args: [ex],
   });
+  // 실제 cost-basis.ts 와 동일 로직: buy fee 제외, sell fee 만 실현손익 차감.
   let qty = new Decimal(0), cost = new Decimal(0), realized = new Decimal(0);
-  let buyQty = new Decimal(0), buyCost = new Decimal(0), buyCostNoFee = new Decimal(0);
+  let buyQty = new Decimal(0), buyCostNoFee = new Decimal(0);
   let sellQty = new Decimal(0), sellGross = new Decimal(0);
   let totalFee = new Decimal(0);
   for (const t of r.rows) {
@@ -22,9 +23,8 @@ for (const ex of ['upbit', 'bithumb']) {
     totalFee = totalFee.plus(f);
     if (t.side === 'buy') {
       buyQty = buyQty.plus(q);
-      buyCost = buyCost.plus(q.times(p)).plus(f);
       buyCostNoFee = buyCostNoFee.plus(q.times(p));
-      cost = cost.plus(q.times(p)).plus(f);
+      cost = cost.plus(q.times(p));    // ← fee 제외
       qty = qty.plus(q);
     } else if (t.side === 'sell') {
       sellQty = sellQty.plus(q);
@@ -40,14 +40,11 @@ for (const ex of ['upbit', 'bithumb']) {
   console.log(`\n=== ${ex} BTC ===`);
   console.log('  rows=', r.rows.length, ' buys=', buyQty.toString(), ' sells=', sellQty.toString());
   console.log('  net qty (buys - sells) =', buyQty.minus(sellQty).toFixed(8));
-  console.log('  current qty (after FIFO/moving)=', qty.toFixed(8));
+  console.log('  current qty (orders 기준)=', qty.toFixed(8));
   console.log('  total fee paid =', totalFee.toFixed(2), 'KRW');
-  console.log('  buy cost (incl fee) =', buyCost.toFixed(0));
-  console.log('  buy cost (no fee)   =', buyCostNoFee.toFixed(0));
-  console.log('  buy avg incl fee =', buyQty.gt(0) ? buyCost.div(buyQty).toFixed(0) : '-');
-  console.log('  buy avg no fee   =', buyQty.gt(0) ? buyCostNoFee.div(buyQty).toFixed(0) : '-');
+  console.log('  buy avg (no fee)        =', buyQty.gt(0) ? buyCostNoFee.div(buyQty).toFixed(0) : '-');
   console.log('  moving-avg cost remaining =', cost.toFixed(0));
-  console.log('  moving-avg avg = ', qty.gt(0) ? cost.div(qty).toFixed(0) : '-');
+  console.log('  moving-avg avg (no fee) = ', qty.gt(0) ? cost.div(qty).toFixed(0) : '-');
   console.log('  realized PnL =', realized.toFixed(0));
 }
 

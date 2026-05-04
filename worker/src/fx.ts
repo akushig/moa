@@ -7,7 +7,8 @@
 // 더 긴 TTL 은 stablecoin 평가가 시세에 못 따라가는 위험 있음.
 
 const TTL_MS = 30_000;
-let cache: { rate: number; expiresAt: number } | null = null;
+type CacheEntry = { rate: number; source: string; expiresAt: number };
+let cache: CacheEntry | null = null;
 
 async function fetchFromBok(key: string): Promise<number> {
   // ECOS API: 통계코드 731Y001 = 시장평균환율 (서울외환시장).
@@ -45,25 +46,41 @@ async function fetchFromFrankfurter(): Promise<number> {
   return rate;
 }
 
+export type FxFetchResult = {
+  rate: number;
+  source: 'bok' | 'frankfurter';
+  cached: boolean;
+};
+
 export async function getUsdKrwRate(): Promise<number> {
+  return (await getUsdKrwRateWithMeta()).rate;
+}
+
+export async function getUsdKrwRateWithMeta(): Promise<FxFetchResult> {
   const now = Date.now();
-  if (cache && cache.expiresAt > now) return cache.rate;
+  if (cache && cache.expiresAt > now) {
+    return { rate: cache.rate, source: cache.source as 'bok' | 'frankfurter', cached: true };
+  }
 
   const bokKey = process.env.BOK_API_KEY;
   let rate: number;
+  let source: 'bok' | 'frankfurter';
   if (bokKey) {
     try {
       rate = await fetchFromBok(bokKey);
+      source = 'bok';
     } catch (e) {
       console.warn(`fx: BoK failed, falling back to Frankfurter — ${e instanceof Error ? e.message : e}`);
       rate = await fetchFromFrankfurter();
+      source = 'frankfurter';
     }
   } else {
     rate = await fetchFromFrankfurter();
+    source = 'frankfurter';
   }
 
-  cache = { rate, expiresAt: now + TTL_MS };
-  return rate;
+  cache = { rate, source, expiresAt: now + TTL_MS };
+  return { rate, source, cached: false };
 }
 
 // 테스트 / 디버그용
