@@ -9,22 +9,22 @@ import {
   type TransactionInput,
 } from './db.js';
 
-// 주어진 closed order → Transaction row.
-// price = null (시장가 주문) 케이스: executed_volume × ??? 알 수 없으므로 paid_fee
-// 기준으로 무시. v0.1 dogfood = 지정가 위주이므로 가벼운 처리.
+// closed order → Transaction row.
+// per-unit price = executed_funds / executed_volume (모든 ord_type 에서 정확).
+// `price` 필드는 ord_type 마다 의미 다름 (limit=지정가, price=KRW주문금액,
+// market=null) → 절대 직접 사용 X.
 function orderToTransaction(
   o: UpbitOrder | BithumbOrder,
   exchange: 'upbit' | 'bithumb',
 ): TransactionInput | null {
   const executed = new Decimal(o.executed_volume ?? '0');
   if (executed.lte(0)) return null;
-  // market = "KRW-BTC" → quote = "KRW", base = "BTC"
+  const funds = new Decimal(o.executed_funds ?? '0');
+  if (funds.lte(0)) return null;
   const [quote, base] = o.market.split('-');
   if (!quote || !base) return null;
 
-  // price 가 null (시장가 매수의 경우 ord_type=price 면 KRW 금액 명시) — 안전하게 0 처리.
-  // 차트 정확도가 실제 trade 평균가가 필요하지만 현재 단순 spec 으로 충분.
-  const price = o.price ? new Decimal(o.price).toString() : '0';
+  const perUnit = funds.div(executed);
   return {
     timestamp: new Date(o.created_at).getTime(),
     source: 'exchange',
@@ -34,9 +34,9 @@ function orderToTransaction(
     assetSymbol: base,
     side: o.side === 'bid' ? 'buy' : 'sell',
     qty: executed.toString(),
-    price,
+    price: perUnit.toString(),
     fee: o.paid_fee ?? '0',
-    currency: quote, // KRW
+    currency: quote,
     note: `${o.ord_type ?? ''}`.slice(0, 32) || null,
   };
 }

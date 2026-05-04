@@ -10,11 +10,11 @@ const t = (
 ) => ({ timestamp: ts, side, qty, price, fee });
 
 describe('computeCostBasis (moving average)', () => {
-  it('single buy → avg = price (with fee added to cost)', () => {
+  it('single buy → avg = price (fee NOT included in cost — exchange convention)', () => {
     const r = computeCostBasis([t(1, 'buy', '0.5', '50000000', '12500')]);
     expect(r.qty.toString()).toBe('0.5');
-    expect(r.cost.toString()).toBe('25012500');
-    expect(r.avgPrice.toString()).toBe('50025000');
+    expect(r.cost.toString()).toBe('25000000');
+    expect(r.avgPrice.toString()).toBe('50000000');
     expect(r.realizedPnl.toString()).toBe('0');
   });
 

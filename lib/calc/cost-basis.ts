@@ -19,16 +19,15 @@ export type CostBasis = {
 
 const Z = new Decimal(0);
 
-// Moving-average (이동평균) 평균단가. 거래소 평균매입가 정의와 동일.
-//   buy:  cost  += qty × price + fee
+// Moving-average (이동평균) 평균단가. 거래소 (업비트/빗썸) 표시 convention 과 동일:
+// 매입 수수료는 평균단가에 포함하지 않음 (사용자가 화면에서 보는 "매수평균가" 와 일치).
+//   buy:  cost  += qty × price       ← fee 제외
 //         qty   += qty
-//   sell: realized += (price × qty) - (avg × qty) - fee
-//         cost  *= (qty - sellQty) / qty   (보유분의 평균단가는 변하지 않음)
+//   sell: realized += (price × qty) - (avg × qty) - sellFee
+//         cost  *= (qty - sellQty) / qty
 //         qty   -= sellQty
 // deposit/withdraw 는 평균단가 변경하지 않음 (입출고 = 외부 이벤트).
-//   - deposit: qty += qty (cost 는 모르므로 0 으로 본다 — 보수적)
-//     이렇게 두면 후속 buy 에서 평균단가 희석 → 정확하지 않음. v0.5+ 에서
-//     deposit 가격을 timestamp 시점 price 로 마킹하는 옵션 추가.
+//   - deposit: qty += qty (cost 0 으로 — v0.5+ 에서 시점 price 로 mark 옵션 추가)
 //   - withdraw: qty -= qty, cost 비례 감소.
 export function computeCostBasis(txs: TxRow[]): CostBasis {
   // sort ascending by timestamp
@@ -51,7 +50,7 @@ export function computeCostBasis(txs: TxRow[]): CostBasis {
     if (q.lte(0)) continue;
 
     if (t.side === 'buy') {
-      cost = cost.plus(q.times(p)).plus(f);
+      cost = cost.plus(q.times(p));
       qty = qty.plus(q);
       buyCount += 1;
     } else if (t.side === 'sell') {

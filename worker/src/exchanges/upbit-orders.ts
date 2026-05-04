@@ -4,17 +4,22 @@ const UPBIT_API = 'https://api.upbit.com';
 
 // /v1/orders/closed 응답 형태 — 업비트 docs 기반.
 // `done` = 체결 완료. side = `bid` (매수) | `ask` (매도).
-// price/volume/executed_volume 은 string. paid_fee = 수수료(KRW).
+// 정확한 per-unit price 는 ord_type 따라 다름:
+//   - limit: price = 지정가 (per-unit). funds 와 일치.
+//   - price (시장가매수, KRW 금액 입력): price = 주문 KRW 금액. per-unit 아님.
+//   - market (시장가매도, qty 입력): price = 0/null. funds 만 의미있음.
+// → 모든 케이스에서 executed_funds / executed_volume 이 진짜 per-unit.
 export type UpbitOrder = {
   uuid: string;
   side: 'bid' | 'ask';
   ord_type: string;
   state: string;
-  market: string; // KRW-BTC
-  created_at: string; // ISO 8601 (KST tz)
+  market: string;
+  created_at: string;
   price: string | null;
   volume: string | null;
   executed_volume: string;
+  executed_funds: string;
   paid_fee: string;
   trades_count?: number;
 };

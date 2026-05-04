@@ -6,7 +6,7 @@ const BITHUMB_API = 'https://api.bithumb.com';
 // /v1/orders?market=KRW-BTC&state=done&limit=100&page=N 로 통합.
 // time-range 파라미터 없음 → page-based + early stop on cutoff.
 // 응답 shape 는 업비트 호환 (uuid / side / market / price / volume /
-// executed_volume / paid_fee / created_at).
+// executed_volume / executed_funds / paid_fee / created_at).
 export type BithumbOrder = {
   uuid: string;
   side: 'bid' | 'ask';
@@ -17,6 +17,7 @@ export type BithumbOrder = {
   price: string | null;
   volume: string | null;
   executed_volume: string;
+  executed_funds: string;
   paid_fee: string;
   trades_count?: number;
 };
