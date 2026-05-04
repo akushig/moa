@@ -10,6 +10,21 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// 워커가 manual sync 마다 거래소 잔고 환산 결과 1행 insert.
+// Vercel page 는 latest 1행을 read.
+model BalanceSnapshot {
+  id           Int      @id @default(autoincrement())
+  takenAt      DateTime @default(now())
+  exchange     String   // upbit | bithumb
+  totalKrw     Decimal  // exchange 합계 (cash + crypto)
+  cashKrw      Decimal
+  cryptoKrw    Decimal
+  unpricedJson String   // [{currency, balance}] JSON 직렬화
+  rawJson      String?  // 원본 응답 (디버그)
+
+  @@index([exchange, takenAt])
+}
+
 // v0.1: enabled. v0.5+: price_snapshots / fx_rates 추가 활성화.
 model Transaction {
   id          Int      @id @default(autoincrement())

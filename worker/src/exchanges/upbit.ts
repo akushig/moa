@@ -1,11 +1,6 @@
 import { SignJWT } from 'jose';
 import crypto from 'node:crypto';
-import { Decimal } from '@/lib/decimal';
-
-// NOTE: Day 2 부터 Vercel 페이지는 거래소를 직접 호출하지 않는다.
-// 실제 거래소 호출은 worker/src/exchanges/upbit.ts (GCP VM) 에서 수행.
-// 이 파일은 signUpbitJWT 등 순수 유틸 테스트 + Day 3 transaction ingestion
-// (/v1/orders) 시 재활용 후보로만 보존.
+import { Decimal } from 'decimal.js';
 
 const UPBIT_API = 'https://api.upbit.com';
 
@@ -18,10 +13,7 @@ export type UpbitAccount = {
   unit_currency: string;
 };
 
-export type UpbitTicker = {
-  market: string;
-  trade_price: number;
-};
+export type UpbitTicker = { market: string; trade_price: number };
 
 export async function signUpbitJWT(
   accessKey: string,
@@ -45,28 +37,30 @@ export async function signUpbitJWT(
 export async function getUpbitAccounts(): Promise<UpbitAccount[]> {
   const accessKey = process.env.UPBIT_ACCESS_KEY;
   const secretKey = process.env.UPBIT_SECRET_KEY;
-  if (!accessKey || !secretKey) {
-    throw new Error('UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY not set in .env.local');
-  }
+  if (!accessKey || !secretKey) throw new Error('UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY not set');
   const jwt = await signUpbitJWT(accessKey, secretKey);
   const res = await fetch(`${UPBIT_API}/v1/accounts`, {
     headers: { Authorization: `Bearer ${jwt}` },
-    cache: 'no-store',
   });
-  if (!res.ok) {
-    throw new Error(`업비트 API ${res.status}: ${await res.text()}`);
-  }
-  return await res.json();
+  if (!res.ok) throw new Error(`업비트 API ${res.status}: ${await res.text()}`);
+  return (await res.json()) as UpbitAccount[];
 }
 
 export async function getUpbitTickers(markets: string[]): Promise<UpbitTicker[]> {
   if (markets.length === 0) return [];
   const url = `${UPBIT_API}/v1/ticker?markets=${markets.join(',')}`;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) {
-    throw new Error(`업비트 ticker ${res.status}: ${await res.text()}`);
-  }
-  return await res.json();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`업비트 ticker ${res.status}: ${await res.text()}`);
+  return (await res.json()) as UpbitTicker[];
+}
+
+// 업비트에 KRW 마켓이 있는 코인 목록. 잔고에 있어도 KRW 거래 페어가 없으면
+// /v1/ticker?markets=KRW-XXX 가 404 → 호출 전에 미리 거른다.
+export async function getUpbitKrwMarkets(): Promise<Set<string>> {
+  const res = await fetch(`${UPBIT_API}/v1/market/all`);
+  if (!res.ok) throw new Error(`업비트 market/all ${res.status}: ${await res.text()}`);
+  const arr = (await res.json()) as { market: string }[];
+  return new Set(arr.filter((m) => m.market.startsWith('KRW-')).map((m) => m.market));
 }
 
 const STABLECOINS = new Set(['USDT', 'USDC', 'BUSD', 'DAI']);
@@ -91,32 +85,43 @@ export async function getUpbitKrwBreakdown(): Promise<UpbitKrwBreakdown> {
     if (a.currency === 'KRW') {
       cashKrw = cashKrw.plus(a.balance).plus(a.locked);
     } else if (STABLECOINS.has(a.currency)) {
-      // v0.1: 한국은행 fx live fetch 미구현 (Day 2-3) — 일단 unpriced 로 분리
-      unpriced.push({ currency: a.currency, balance: new Decimal(a.balance).plus(a.locked).toString() });
+      unpriced.push({
+        currency: a.currency,
+        balance: new Decimal(a.balance).plus(a.locked).toString(),
+      });
     } else {
       coinSymbols.push(`KRW-${a.currency}`);
     }
   }
 
   if (coinSymbols.length > 0) {
-    const tickers = await getUpbitTickers(coinSymbols);
+    const krwMarkets = await getUpbitKrwMarkets();
+    const tradable = coinSymbols.filter((m) => krwMarkets.has(m));
+    const untradable = coinSymbols.filter((m) => !krwMarkets.has(m));
+    for (const m of untradable) {
+      const sym = m.slice('KRW-'.length);
+      const a = nonZero.find((x) => x.currency === sym)!;
+      unpriced.push({
+        currency: sym,
+        balance: new Decimal(a.balance).plus(a.locked).toString(),
+      });
+    }
+    const tickers = await getUpbitTickers(tradable);
     const priceMap = new Map(tickers.map((t) => [t.market, t.trade_price]));
     for (const a of nonZero) {
       if (a.currency === 'KRW' || STABLECOINS.has(a.currency)) continue;
+      if (!krwMarkets.has(`KRW-${a.currency}`)) continue; // already pushed to unpriced
       const price = priceMap.get(`KRW-${a.currency}`);
       if (price === undefined) {
-        unpriced.push({ currency: a.currency, balance: new Decimal(a.balance).plus(a.locked).toString() });
+        unpriced.push({
+          currency: a.currency,
+          balance: new Decimal(a.balance).plus(a.locked).toString(),
+        });
         continue;
       }
-      const total = new Decimal(a.balance).plus(a.locked).times(price);
-      cryptoKrw = cryptoKrw.plus(total);
+      cryptoKrw = cryptoKrw.plus(new Decimal(a.balance).plus(a.locked).times(price));
     }
   }
 
-  return {
-    totalKrw: cashKrw.plus(cryptoKrw),
-    cashKrw,
-    cryptoKrw,
-    unpriced,
-  };
+  return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced };
 }

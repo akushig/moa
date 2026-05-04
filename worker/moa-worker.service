@@ -1,0 +1,18 @@
+[Unit]
+Description=moa worker (Hono + libSQL)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/moa-worker
+EnvironmentFile=/etc/moa-worker.env
+ExecStart=/opt/moa-worker/node_modules/.bin/tsx /opt/moa-worker/src/index.ts
+Restart=on-failure
+RestartSec=5
+User=www-data
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

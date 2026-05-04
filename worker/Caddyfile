@@ -1,0 +1,5 @@
+# sslip.io 와일드카드 → Let's Encrypt 자동 cert.
+# WORKER_DOMAIN 환경변수 (e.g. 35.x.x.x.sslip.io) 를 setup.sh 에서 주입.
+{$WORKER_DOMAIN} {
+    reverse_proxy 127.0.0.1:8080
+}

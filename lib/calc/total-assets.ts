@@ -1,6 +1,12 @@
 import { Decimal } from '@/lib/decimal';
-import type { UpbitKrwBreakdown } from '@/lib/exchanges/upbit';
 import type { ManualBreakdown } from '@/lib/manual-assets';
+
+export type ExchangeBreakdown = {
+  totalKrw: Decimal;
+  cashKrw: Decimal;
+  cryptoKrw: Decimal;
+  unpriced: { currency: string; balance: string }[];
+};
 
 export type TotalAssets = {
   totalKrw: Decimal;
@@ -14,15 +20,19 @@ export type TotalAssets = {
   };
 };
 
-// 총자산 = Σ(crypto 평가가 KRW) + Σ(cash) + Σ(realestate.deposit - realestate.loan)
+// 총자산 = Σ(crypto KRW) + Σ(cash) + Σ(realestate.deposit - realestate.loan)
 //        - Σ(negative_account.used) - Σ(loan.balance)
 export function computeTotalAssets(
-  upbit: UpbitKrwBreakdown,
+  exchanges: ExchangeBreakdown[],
   manual: ManualBreakdown,
 ): TotalAssets {
+  const zero = new Decimal(0);
+  const crypto = exchanges.reduce((a, e) => a.plus(e.cryptoKrw), zero);
+  const cashExchange = exchanges.reduce((a, e) => a.plus(e.cashKrw), zero);
+
   const parts = {
-    crypto: upbit.cryptoKrw,
-    cashExchange: upbit.cashKrw,
+    crypto,
+    cashExchange,
     cashManual: manual.cashKrw,
     realestateNet: manual.realestateNetKrw,
     negativeAccount: manual.negativeAccountKrw,

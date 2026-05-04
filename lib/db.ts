@@ -16,8 +16,13 @@ function buildClient(): PrismaClient {
   return new PrismaClient({ adapter });
 }
 
-export const prisma = globalThis.__prisma ?? buildClient();
-
-if (process.env.NODE_ENV !== 'production') {
-  globalThis.__prisma = prisma;
-}
+// Lazy proxy: 빌드 시 page data collection 등 prisma method 를 부르지 않는
+// 코드 경로에서는 인스턴스를 만들지 않는다. (Vercel build 시점에 secrets 가
+// 없는 환경에서도 build 자체는 통과시키기 위함.)
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_t, prop, receiver) {
+    const client = globalThis.__prisma ?? buildClient();
+    if (process.env.NODE_ENV !== 'production') globalThis.__prisma = client;
+    return Reflect.get(client, prop, receiver);
+  },
+}) as PrismaClient;

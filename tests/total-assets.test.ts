@@ -29,7 +29,7 @@ describe('computeTotalAssets', () => {
         },
       ],
     });
-    const r = computeTotalAssets(upbit, manual);
+    const r = computeTotalAssets([upbit], manual);
     // crypto 1000만 + cashExchange 500만 + cashManual 800만 + 부동산순(2억) - 마통(1200만) - 대출(2.3억) = -2300만
     expect(r.totalKrw.toString()).toBe(
       new Decimal(10_000_000)
@@ -51,7 +51,7 @@ describe('computeTotalAssets', () => {
       unpriced: [],
     };
     const manual = summarizeManual({});
-    const r = computeTotalAssets(upbit, manual);
+    const r = computeTotalAssets([upbit], manual);
     expect(r.totalKrw.toNumber()).toBe(0);
   });
 
@@ -64,8 +64,28 @@ describe('computeTotalAssets', () => {
       unpriced: [],
     };
     const manual = summarizeManual({});
-    const r = computeTotalAssets(upbit, manual);
+    const r = computeTotalAssets([upbit], manual);
     expect(r.totalKrw.toString()).toBe('12345');
+  });
+
+  it('sums across multiple exchanges (upbit + bithumb)', () => {
+    const upbit = {
+      totalKrw: new Decimal(15_000_000),
+      cashKrw: new Decimal(5_000_000),
+      cryptoKrw: new Decimal(10_000_000),
+      unpriced: [],
+    };
+    const bithumb = {
+      totalKrw: new Decimal(7_500_000),
+      cashKrw: new Decimal(500_000),
+      cryptoKrw: new Decimal(7_000_000),
+      unpriced: [],
+    };
+    const manual = summarizeManual({});
+    const r = computeTotalAssets([upbit, bithumb], manual);
+    expect(r.parts.crypto.toNumber()).toBe(17_000_000);
+    expect(r.parts.cashExchange.toNumber()).toBe(5_500_000);
+    expect(r.totalKrw.toNumber()).toBe(22_500_000);
   });
 
   it('treats missing fields in manual assets as 0', () => {
