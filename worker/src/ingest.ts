@@ -19,7 +19,7 @@ import {
   getLatestTransferTimestamp,
   type TransactionInput,
 } from './db.js';
-import { getDailyClosePrice } from './historical-prices.js';
+import { getHistoricalPriceAt } from './historical-prices.js';
 
 // closed order → Transaction row.
 // per-unit price = executed_funds / executed_volume (모든 ord_type 에서 정확).
@@ -75,7 +75,7 @@ async function transferToTransaction(
   let price = '0';
   if (t.type === 'deposit') {
     const market = `KRW-${t.currency}`;
-    const histPrice = await getDailyClosePrice(exchange, market, ts);
+    const histPrice = await getHistoricalPriceAt(exchange, market, ts);
     if (histPrice) price = histPrice;
     // null 이면 그대로 0 → cost-basis 측에서 trackedQty 변경 없이 skip 됨
   }
@@ -147,9 +147,14 @@ async function ingest(
       fetchWithdraws(since ?? undefined),
     ]);
     transfersFetched = deposits.length + withdraws.length;
-    for (const d of [...deposits, ...withdraws]) {
-      const t = await transferToTransaction(d, source);
-      if (t) all.push(t);
+    // deposit 마다 historical price API 호출 — 직렬 처리 시 100+건 누적되어 느림.
+    // 동시성 10 으로 chunk 처리. (1m candle endpoint rate limit 충분히 여유, fetch 자체는 5s timeout.)
+    const allTransfers = [...deposits, ...withdraws];
+    const CHUNK = 10;
+    for (let i = 0; i < allTransfers.length; i += CHUNK) {
+      const chunk = allTransfers.slice(i, i + CHUNK);
+      const results = await Promise.all(chunk.map((d) => transferToTransaction(d, source)));
+      for (const t of results) if (t) all.push(t);
     }
   } catch (e) {
     errors.push(`transfers: ${e instanceof Error ? e.message : String(e)}`);
