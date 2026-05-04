@@ -12,15 +12,21 @@ datasource db {
 
 // 워커가 manual sync 마다 거래소 잔고 환산 결과 1행 insert.
 // Vercel page 는 latest 1행을 read.
+//
+// 멀티거래소 (binance/mexc) 대응:
+// - quoteCurrency = 그 거래소의 native quote (upbit/bithumb=KRW, binance=USDT, ...)
+// - totalKrw / cashKrw / cryptoKrw 컬럼명은 legacy 유지하지만 실제 단위는
+//   quoteCurrency 통화. 코드 ref 적게 두려고 rename 보류.
 model BalanceSnapshot {
-  id           Int      @id @default(autoincrement())
-  takenAt      DateTime @default(now())
-  exchange     String   // upbit | bithumb
-  totalKrw     Decimal  // exchange 합계 (cash + crypto)
-  cashKrw      Decimal
-  cryptoKrw    Decimal
-  unpricedJson String   // [{currency, balance}] JSON 직렬화
-  rawJson      String?  // 원본 응답 (디버그)
+  id            Int      @id @default(autoincrement())
+  takenAt       DateTime @default(now())
+  exchange      String   // upbit | bithumb | binance
+  quoteCurrency String   @default("KRW")  // KRW | USDT | USDC | ...
+  totalKrw      Decimal  // 합계, quoteCurrency 단위
+  cashKrw       Decimal  // cash, quoteCurrency 단위
+  cryptoKrw     Decimal  // crypto, quoteCurrency 단위
+  unpricedJson  String   // [{currency, balance}] JSON
+  rawJson       String?  // holdings 원본 + 디버그
 
   @@index([exchange, takenAt])
 }

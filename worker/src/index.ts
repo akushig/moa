@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { timingSafeEqual } from 'node:crypto';
 import { getUpbitKrwBreakdown } from './exchanges/upbit.js';
 import { getBithumbKrwBreakdown } from './exchanges/bithumb.js';
+import { getBinanceUsdtBreakdown } from './exchanges/binance.js';
 import {
   insertSnapshot,
   insertPriceSnapshots,
@@ -45,6 +46,7 @@ app.post('/sync', async (c) => {
         const r = await getUpbitKrwBreakdown();
         await insertSnapshot({
           exchange: 'upbit',
+          quoteCurrency: 'KRW',
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
@@ -61,9 +63,10 @@ app.post('/sync', async (c) => {
           }
         }
         results.upbit = {
-          totalKrw: r.totalKrw.toString(),
-          cashKrw: r.cashKrw.toString(),
-          cryptoKrw: r.cryptoKrw.toString(),
+          quoteCurrency: 'KRW',
+          total: r.totalKrw.toString(),
+          cash: r.cashKrw.toString(),
+          crypto: r.cryptoKrw.toString(),
           unpricedCount: r.unpriced.length,
           holdingsCount: r.holdings.length,
         };
@@ -76,6 +79,7 @@ app.post('/sync', async (c) => {
         const r = await getBithumbKrwBreakdown();
         await insertSnapshot({
           exchange: 'bithumb',
+          quoteCurrency: 'KRW',
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
@@ -92,14 +96,50 @@ app.post('/sync', async (c) => {
           }
         }
         results.bithumb = {
-          totalKrw: r.totalKrw.toString(),
-          cashKrw: r.cashKrw.toString(),
-          cryptoKrw: r.cryptoKrw.toString(),
+          quoteCurrency: 'KRW',
+          total: r.totalKrw.toString(),
+          cash: r.cashKrw.toString(),
+          crypto: r.cryptoKrw.toString(),
           unpricedCount: r.unpriced.length,
           holdingsCount: r.holdings.length,
         };
       } catch (e) {
         errors.bithumb = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+    (async () => {
+      // Binance — quote=USDT. 키 미설정이면 무시 (옵셔널).
+      if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_SECRET_KEY) return;
+      try {
+        const r = await getBinanceUsdtBreakdown();
+        await insertSnapshot({
+          exchange: 'binance',
+          quoteCurrency: 'USDT',
+          totalKrw: r.totalUsdt.toString(),
+          cashKrw: r.cashUsdt.toString(),
+          cryptoKrw: r.cryptoUsdt.toString(),
+          unpriced: r.unpriced,
+          raw: { holdings: r.holdings },
+        });
+        for (const h of r.holdings) {
+          if (h.priceKrw && h.source === 'usdt_market') {
+            priceSnapshots.push({
+              market: `USDT-${h.currency}`,
+              price: h.priceKrw,
+              source: 'binance',
+            });
+          }
+        }
+        results.binance = {
+          quoteCurrency: 'USDT',
+          total: r.totalUsdt.toString(),
+          cash: r.cashUsdt.toString(),
+          crypto: r.cryptoUsdt.toString(),
+          unpricedCount: r.unpriced.length,
+          holdingsCount: r.holdings.length,
+        };
+      } catch (e) {
+        errors.binance = e instanceof Error ? e.message : String(e);
       }
     })(),
   ]);

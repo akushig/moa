@@ -7,23 +7,26 @@ if (!url) throw new Error('TURSO_DATABASE_URL not set');
 export const db = createClient({ url, authToken });
 
 export type SnapshotInput = {
-  exchange: 'upbit' | 'bithumb';
+  exchange: 'upbit' | 'bithumb' | 'binance';
+  quoteCurrency: 'KRW' | 'USDT' | 'USDC' | string;
+  // 컬럼명은 legacy 'Krw' 지만 단위는 quoteCurrency 통화. binance=USDT.
   totalKrw: string;
   cashKrw: string;
   cryptoKrw: string;
   unpriced: { currency: string; balance: string }[];
-  raw?: unknown; // per-coin priced rows (holdings) — 대시보드가 평균단가/평가금액 위해 read.
+  raw?: unknown; // per-coin holdings — 대시보드 평균단가/평가금액 read.
 };
 
-// Prisma 가 SQLite/libSQL DateTime 을 INTEGER (epoch ms) 로 매핑한다.
+// Prisma 가 SQLite/libSQL DateTime 을 INTEGER (epoch ms) 로 매핑.
 export async function insertSnapshot(s: SnapshotInput): Promise<void> {
   await db.execute({
     sql: `INSERT INTO BalanceSnapshot
-            (takenAt, exchange, totalKrw, cashKrw, cryptoKrw, unpricedJson, rawJson)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            (takenAt, exchange, quoteCurrency, totalKrw, cashKrw, cryptoKrw, unpricedJson, rawJson)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       Date.now(),
       s.exchange,
+      s.quoteCurrency,
       s.totalKrw,
       s.cashKrw,
       s.cryptoKrw,

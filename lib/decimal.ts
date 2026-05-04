@@ -11,3 +11,14 @@ export function toKrwInt(d: Decimal | string | number): number {
 export function formatKrw(d: Decimal | string | number): string {
   return toKrwInt(d).toLocaleString('ko-KR') + '원';
 }
+
+// 통화별 포맷. KRW = 원화 정수. 그 외 (USDT, USDC, ...) = 소수 2자리 + suffix.
+export function formatQuote(d: Decimal | string | number, quote: string): string {
+  if (quote === 'KRW') return formatKrw(d);
+  const decimals = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'DAI', 'TUSD'].includes(quote) ? 2 : 4;
+  const v = new Decimal(d).toDecimalPlaces(decimals, Decimal.ROUND_HALF_EVEN);
+  return `${v.toNumber().toLocaleString('ko-KR', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })} ${quote}`;
+}

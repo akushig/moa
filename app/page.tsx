@@ -4,23 +4,26 @@ import { Decimal } from '@/lib/decimal';
 import { loadManualAssets, summarizeManual } from '@/lib/manual-assets';
 import { computeTotalAssets, type ExchangeBreakdown } from '@/lib/calc/total-assets';
 import { groupCostBasis } from '@/lib/calc/cost-basis';
-import { formatKrw } from '@/lib/decimal';
+import { formatKrw, formatQuote } from '@/lib/decimal';
 import { SyncButton } from './sync-button';
 
 export const dynamic = 'force-dynamic';
 
+// holdings 의 priceKrw / valueKrw 단위는 BalanceSnapshot.quoteCurrency 통화
+// (upbit/bithumb=KRW, binance=USDT). avgBuyPrice 도 동일.
 type Holding = {
   currency: string;
   qty: string;
-  avgBuyPrice: string; // 거래소 측 값
+  avgBuyPrice: string | null;
   unitCurrency: string;
   priceKrw: string | null;
   valueKrw: string | null;
-  source: 'krw_market' | 'fx' | 'unpriced';
+  source: 'krw_market' | 'usdt_market' | 'fx' | 'parity' | 'unpriced';
 };
 
 function rowToBreakdown(row: BalanceSnapshot): {
   exchange: string;
+  quoteCurrency: string;
   takenAt: Date;
   breakdown: ExchangeBreakdown;
   holdings: Holding[];
@@ -43,6 +46,7 @@ function rowToBreakdown(row: BalanceSnapshot): {
   })();
   return {
     exchange: row.exchange,
+    quoteCurrency: row.quoteCurrency,
     takenAt: row.takenAt,
     breakdown: {
       totalKrw: new Decimal(String(row.totalKrw)),
@@ -55,29 +59,48 @@ function rowToBreakdown(row: BalanceSnapshot): {
 }
 
 async function load() {
-  const [upbitRow, bithumbRow, txs, manualRaw] = await Promise.all([
-    prisma.balanceSnapshot.findFirst({
-      where: { exchange: 'upbit' },
-      orderBy: { takenAt: 'desc' },
-    }),
-    prisma.balanceSnapshot.findFirst({
-      where: { exchange: 'bithumb' },
-      orderBy: { takenAt: 'desc' },
-    }),
+  const [snapshots, txs, manualRaw] = await Promise.all([
+    // 거래소별 최신 1행 (group by 후 max id) — Prisma 가 raw 안 써도 가능하지만 단순 N+1.
+    Promise.all(
+      ['upbit', 'bithumb', 'binance'].map((ex) =>
+        prisma.balanceSnapshot.findFirst({
+          where: { exchange: ex },
+          orderBy: { takenAt: 'desc' },
+        }),
+      ),
+    ),
     prisma.transaction.findMany({
       where: { source: 'exchange' },
       orderBy: { timestamp: 'asc' },
     }),
     loadManualAssets(),
   ]);
-  const exchanges = [upbitRow, bithumbRow]
+  const exchanges = snapshots
     .filter((r): r is BalanceSnapshot => r !== null)
     .map(rowToBreakdown);
   const manual = summarizeManual(manualRaw);
+
+  // KRW quote 거래소만 합산 (multi-currency 환산은 v0.5+).
+  const krwExchanges = exchanges.filter((e) => e.quoteCurrency === 'KRW');
   const total = computeTotalAssets(
-    exchanges.map((e) => e.breakdown),
+    krwExchanges.map((e) => e.breakdown),
     manual,
   );
+
+  // quoteCurrency 별 거래소 합계 (분리 표시용).
+  const totalsByQuote = new Map<string, { cash: Decimal; crypto: Decimal; total: Decimal }>();
+  for (const e of exchanges) {
+    const cur = totalsByQuote.get(e.quoteCurrency) ?? {
+      cash: new Decimal(0),
+      crypto: new Decimal(0),
+      total: new Decimal(0),
+    };
+    cur.cash = cur.cash.plus(e.breakdown.cashKrw);
+    cur.crypto = cur.crypto.plus(e.breakdown.cryptoKrw);
+    cur.total = cur.total.plus(e.breakdown.totalKrw);
+    totalsByQuote.set(e.quoteCurrency, cur);
+  }
+
   const unpriced = exchanges.flatMap((e) => e.breakdown.unpriced);
 
   // (exchange, symbol) → CostBasis
@@ -99,7 +122,15 @@ async function load() {
     new Decimal(0),
   );
 
-  return { exchanges, total, unpriced, cb, txCount: txs.length, totalRealized };
+  return {
+    exchanges,
+    total,
+    totalsByQuote,
+    unpriced,
+    cb,
+    txCount: txs.length,
+    totalRealized,
+  };
 }
 
 export default async function Page() {
@@ -128,8 +159,6 @@ export default async function Page() {
   const haveAnySnapshot = r.exchanges.length > 0;
 
   // (exchange, symbol) → 보유 holding + cost basis 결합
-  // moaAvg = Transaction 기반 이동평균 (deposit 제외, withdraw 비례차감)
-  // exchangeAvg = 거래소가 알려주는 avg_buy_price (참고용)
   const holdingRows = r.exchanges.flatMap((e) =>
     e.holdings
       .filter((h) => new Decimal(h.qty).gt(0))
@@ -140,7 +169,6 @@ export default async function Page() {
         const moaAvg = cb && cb.trackedQty.gt(0) ? cb.avgPrice : null;
         const exchangeAvgRaw = h.avgBuyPrice ? new Decimal(h.avgBuyPrice) : null;
         const exchangeAvg = exchangeAvgRaw && exchangeAvgRaw.gt(0) ? exchangeAvgRaw : null;
-        // 표시용 평균단가: moa 우선, 없으면 거래소
         const avgPrice = moaAvg ?? exchangeAvg;
         const costBasis = avgPrice && new Decimal(h.qty).gt(0)
           ? avgPrice.times(h.qty)
@@ -151,6 +179,7 @@ export default async function Page() {
           : null;
         return {
           exchange: e.exchange,
+          quoteCurrency: e.quoteCurrency,
           currency: h.currency,
           qty: h.qty,
           priceKrw,
@@ -184,7 +213,17 @@ export default async function Page() {
           <SyncButton />
         </div>
       </div>
+
+      {/* KRW 메인 (수기 자산 포함). 다른 통화는 거래소 합만 별도 줄로 추가. */}
       <div className="mt-2 text-5xl font-semibold">{formatKrw(totalKrw)}</div>
+      {Array.from(r.totalsByQuote.entries())
+        .filter(([q]) => q !== 'KRW')
+        .map(([q, v]) => (
+          <div key={q} className="mt-2 text-2xl text-[var(--muted)]">
+            {formatQuote(v.total, q)}
+            <span className="ml-2 text-xs">(거래소 합)</span>
+          </div>
+        ))}
       <div className="mt-2 text-xs text-[var(--muted)]">
         최근 동기화: {lastSyncStr} · 거래내역 {r.txCount.toLocaleString('ko-KR')}건 · 누적 실현손익{' '}
         <span className={r.totalRealized.gte(0) ? '' : 'text-[var(--negative)]'}>
@@ -195,8 +234,8 @@ export default async function Page() {
 
       <table className="mt-10 w-full text-sm">
         <tbody>
-          <Row label="암호화폐 (거래소 합)" value={parts.crypto.toString()} />
-          <Row label="현금 (거래소 KRW 합)" value={parts.cashExchange.toString()} />
+          <Row label="암호화폐 (KRW 거래소 합)" value={parts.crypto.toString()} />
+          <Row label="현금 (KRW 거래소 합)" value={parts.cashExchange.toString()} />
           <Row label="현금 (수기)" value={parts.cashManual.toString()} />
           <Row label="부동산 순자산 (전세보증금 - 전세대출)" value={parts.realestateNet.toString()} />
           <Row label="마이너스통장 사용액" value={parts.negativeAccount.toString()} negative />
@@ -233,8 +272,12 @@ export default async function Page() {
                       <td className="py-2 text-[var(--muted)]">{h.exchange}</td>
                       <td className="py-2">
                         {h.currency}
+                        <span className="ml-1 text-[10px] text-[var(--muted)]">/{h.quoteCurrency}</span>
                         {h.source === 'fx' && (
                           <span className="ml-1 text-[10px] text-[var(--muted)]">fx</span>
+                        )}
+                        {h.source === 'parity' && (
+                          <span className="ml-1 text-[10px] text-[var(--muted)]">stable</span>
                         )}
                         {h.source === 'unpriced' && (
                           <span className="ml-1 text-[10px] text-[var(--negative)]">미환산</span>
@@ -242,7 +285,7 @@ export default async function Page() {
                       </td>
                       <td className="py-2 text-right tabular-nums">{trimQty(h.qty)}</td>
                       <td className="py-2 text-right tabular-nums">
-                        {h.moaAvg ? formatKrw(h.moaAvg) : '—'}
+                        {h.moaAvg ? formatQuote(h.moaAvg, h.quoteCurrency) : '—'}
                         {diff && diff.abs().gte(1) && (
                           <span
                             className={`ml-1 text-[10px] ${diff.lt(0) ? 'text-[var(--negative)]' : 'text-[var(--muted)]'}`}
@@ -254,13 +297,13 @@ export default async function Page() {
                         )}
                       </td>
                       <td className="py-2 text-right tabular-nums text-[var(--muted)]">
-                        {h.exchangeAvg ? formatKrw(h.exchangeAvg) : '—'}
+                        {h.exchangeAvg ? formatQuote(h.exchangeAvg, h.quoteCurrency) : '—'}
                       </td>
                       <td className="py-2 text-right tabular-nums">
-                        {h.priceKrw ? formatKrw(h.priceKrw) : '—'}
+                        {h.priceKrw ? formatQuote(h.priceKrw, h.quoteCurrency) : '—'}
                       </td>
                       <td className="py-2 text-right tabular-nums">
-                        {h.valueKrw ? formatKrw(h.valueKrw) : '—'}
+                        {h.valueKrw ? formatQuote(h.valueKrw, h.quoteCurrency) : '—'}
                       </td>
                       <td
                         className={`py-2 text-right tabular-nums ${h.unrealized && h.unrealized.lt(0) ? 'text-[var(--negative)]' : ''}`}
@@ -268,7 +311,7 @@ export default async function Page() {
                         {h.unrealized ? (
                           <>
                             {h.unrealized.gte(0) ? '+' : ''}
-                            {formatKrw(h.unrealized)}
+                            {formatQuote(h.unrealized, h.quoteCurrency)}
                             {h.pct && (
                               <span className="ml-1 text-[10px]">
                                 ({h.pct.gte(0) ? '+' : ''}
@@ -286,7 +329,7 @@ export default async function Page() {
                         {h.realizedPnl && !h.realizedPnl.eq(0) ? (
                           <>
                             {h.realizedPnl.gte(0) ? '+' : ''}
-                            {formatKrw(h.realizedPnl)}
+                            {formatQuote(h.realizedPnl, h.quoteCurrency)}
                           </>
                         ) : (
                           '—'
