@@ -3,6 +3,7 @@ import { Decimal, formatKrw } from '@/lib/decimal';
 import { computeHoldingsAt } from '@/lib/calc/holdings-at';
 import { fetchPricesForHoldings } from '@/lib/calc/historical-price';
 import { groupCostBasis } from '@/lib/calc/cost-basis';
+import { getFxAtOrNearest } from '@/lib/calc/fx';
 import { DateForm } from './date-form';
 
 export const dynamic = 'force-dynamic';
@@ -61,10 +62,13 @@ async function load(asOfMs: number) {
     })),
   );
 
-  // 3) 그 시점 가격 조회 (PriceSnapshot 우선, candle fallback)
-  const priceMap = await fetchPricesForHoldings(holdings, asOfMs);
+  // 3) 그 시점 가격 + USDT/KRW 환율 (binance row 환산용) 병렬
+  const [priceMap, fxAt] = await Promise.all([
+    fetchPricesForHoldings(holdings, asOfMs),
+    getFxAtOrNearest('USDT', 'KRW', asOfMs),
+  ]);
 
-  return { txs, holdings, cb, priceMap };
+  return { txs, holdings, cb, priceMap, fxAt };
 }
 
 export default async function AssetAtPage({ searchParams }: { searchParams: SP }) {
@@ -84,12 +88,26 @@ export default async function AssetAtPage({ searchParams }: { searchParams: SP }
     );
   }
 
+  // binance row 의 raw 값 (price/avgPrice/realizedPnl) 은 USDT 단위 → 그 시점 fx 곱해 KRW 통일.
+  // fx 없으면 binance row 미환산 (null) 으로 표시.
+  const fx = r.fxAt;
   const rows = r.holdings
     .map((h) => {
       const cbEntry = r.cb.get(`${h.exchange}::${h.symbol}`);
-      const price = r.priceMap.get(`${h.exchange}::${h.symbol}`) ?? null;
+      const rawPrice = r.priceMap.get(`${h.exchange}::${h.symbol}`) ?? null;
+      const rawAvg = cbEntry && cbEntry.trackedQty.gt(0) ? cbEntry.avgPrice : null;
+      const rawRealized = cbEntry?.realizedPnl ?? null;
+      const isBinance = h.exchange === 'binance';
+      const toKrw = (d: Decimal | null): Decimal | null => {
+        if (d === null) return null;
+        if (!isBinance) return d;
+        if (!fx) return null;
+        return d.times(fx.rate);
+      };
+      const price = toKrw(rawPrice);
+      const avgPrice = toKrw(rawAvg);
+      const realized = toKrw(rawRealized);
       const value = price ? h.qty.times(price) : null;
-      const avgPrice = cbEntry && cbEntry.trackedQty.gt(0) ? cbEntry.avgPrice : null;
       const costBasis = avgPrice ? avgPrice.times(h.qty) : null;
       const unrealized = value && costBasis ? value.minus(costBasis) : null;
       const pct =
@@ -103,7 +121,8 @@ export default async function AssetAtPage({ searchParams }: { searchParams: SP }
         avgPrice,
         unrealized,
         pct,
-        realized: cbEntry?.realizedPnl ?? null,
+        realized,
+        isBinance,
       };
     })
     .sort((a, b) => {
@@ -113,10 +132,16 @@ export default async function AssetAtPage({ searchParams }: { searchParams: SP }
     });
 
   const totalValue = rows.reduce((acc, h) => (h.value ? acc.plus(h.value) : acc), new Decimal(0));
-  const totalRealized = Array.from(r.cb.values()).reduce(
-    (acc, v) => acc.plus(v.realizedPnl),
-    new Decimal(0),
-  );
+  // 누적 실현손익 — binance(USDT) 는 그 시점 환율로 KRW 환산해서 합산. fx 없으면 binance 분 제외.
+  let totalRealized = new Decimal(0);
+  for (const [k, v] of r.cb.entries()) {
+    const exchange = k.split('::')[0];
+    if (exchange === 'binance') {
+      if (fx) totalRealized = totalRealized.plus(v.realizedPnl.times(fx.rate));
+    } else {
+      totalRealized = totalRealized.plus(v.realizedPnl);
+    }
+  }
   const txCount = r.txs.length;
   const unpriced = rows.filter((h) => h.price === null);
 
@@ -142,6 +167,15 @@ export default async function AssetAtPage({ searchParams }: { searchParams: SP }
       <p className="mt-3 text-[10px] text-[var(--muted)]">
         매수/매도/입금/출금 transaction 만 사용해 그 시점 보유수량 복원 → 그 시점 시장가 (PriceSnapshot 우선, 없으면 거래소
         분봉/일봉 API) 으로 평가. BalanceSnapshot 의 actual qty 와 약간 다를 수 있음 (거래소 내부 fee/조정 미반영).
+        {fx && (
+          <>
+            {' '}binance USDT → KRW 환산: <span className="font-mono">{formatKrw(fx.rate)}/USDT</span>{' '}
+            ({new Date(fx.takenAt).toLocaleDateString('ko-KR')} FxRate).
+          </>
+        )}
+        {!fx && rows.some((row) => row.isBinance) && (
+          <span className="text-[var(--negative)]"> · binance 환율 데이터 없음 → 미환산</span>
+        )}
       </p>
 
       {rows.length > 0 ? (

@@ -146,8 +146,10 @@ export async function getHistoricalPriceAt(
   return day ? new Decimal(day) : null;
 }
 
-// 여러 holdings 의 가격을 동시 fetch (concurrency 8). retroactive view 전용 —
-// upbit/bithumb 만 사용해서 source='upbit'|'bithumb' 시그니처 유지.
+// 여러 holdings 의 가격을 동시 fetch (concurrency 8). retroactive view 전용.
+// 거래소별 quote 단위:
+//   - upbit/bithumb: KRW (반환값도 KRW)
+//   - binance: USDT (caller 가 FxRate 곱해서 KRW 환산)
 export async function fetchPricesForHoldings(
   holdings: { exchange: string; symbol: string }[],
   asOfMs: number,
@@ -158,8 +160,10 @@ export async function fetchPricesForHoldings(
     const chunk = holdings.slice(i, i + CHUNK);
     const results = await Promise.all(
       chunk.map(async (h) => {
-        const market = `KRW-${h.symbol}`;
-        const price = await getHistoricalPriceAt(h.exchange as 'upbit' | 'bithumb', market, asOfMs);
+        const isBinance = h.exchange === 'binance';
+        const market = isBinance ? `USDT-${h.symbol}` : `KRW-${h.symbol}`;
+        const source = isBinance ? 'binance' : (h.exchange as 'upbit' | 'bithumb');
+        const price = await getHistoricalPriceAt(source, market, asOfMs);
         return [`${h.exchange}::${h.symbol}`, price] as const;
       }),
     );
