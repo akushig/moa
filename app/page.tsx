@@ -4,6 +4,7 @@ import { Decimal } from '@/lib/decimal';
 import { loadManualAssets, summarizeManual } from '@/lib/manual-assets';
 import { computeTotalAssets, type ExchangeBreakdown } from '@/lib/calc/total-assets';
 import { groupCostBasis } from '@/lib/calc/cost-basis';
+import { getLatestFxRate } from '@/lib/calc/fx';
 import { formatKrw, formatQuote } from '@/lib/decimal';
 import { SyncButton } from './sync-button';
 
@@ -59,7 +60,7 @@ function rowToBreakdown(row: BalanceSnapshot): {
 }
 
 async function load() {
-  const [snapshots, txs, manualRaw] = await Promise.all([
+  const [snapshots, txs, manualRaw, fxUsdtKrw] = await Promise.all([
     // 거래소별 최신 1행 (group by 후 max id) — Prisma 가 raw 안 써도 가능하지만 단순 N+1.
     Promise.all(
       ['upbit', 'bithumb', 'binance'].map((ex) =>
@@ -74,18 +75,30 @@ async function load() {
       orderBy: { timestamp: 'asc' },
     }),
     loadManualAssets(),
+    getLatestFxRate('USDT', 'KRW'),
   ]);
   const exchanges = snapshots
     .filter((r): r is BalanceSnapshot => r !== null)
     .map(rowToBreakdown);
   const manual = summarizeManual(manualRaw);
 
-  // KRW quote 거래소만 합산 (multi-currency 환산은 v0.5+).
-  const krwExchanges = exchanges.filter((e) => e.quoteCurrency === 'KRW');
-  const total = computeTotalAssets(
-    krwExchanges.map((e) => e.breakdown),
-    manual,
-  );
+  // 비-KRW 거래소 (binance 등) 는 FxRate 로 KRW 환산 후 합산. FX 없으면 총자산에서 제외.
+  const breakdownsForTotal: ExchangeBreakdown[] = [];
+  for (const e of exchanges) {
+    if (e.quoteCurrency === 'KRW') {
+      breakdownsForTotal.push(e.breakdown);
+      continue;
+    }
+    if (!fxUsdtKrw) continue;
+    // v0.1 에서는 USDT 외 quote 없음. USDC/BUSD 등은 USDT 와 1:1 가정.
+    breakdownsForTotal.push({
+      totalKrw: e.breakdown.totalKrw.times(fxUsdtKrw.rate),
+      cashKrw: e.breakdown.cashKrw.times(fxUsdtKrw.rate),
+      cryptoKrw: e.breakdown.cryptoKrw.times(fxUsdtKrw.rate),
+      unpriced: e.breakdown.unpriced,
+    });
+  }
+  const total = computeTotalAssets(breakdownsForTotal, manual);
 
   // quoteCurrency 별 거래소 합계 (분리 표시용).
   const totalsByQuote = new Map<string, { cash: Decimal; crypto: Decimal; total: Decimal }>();
@@ -130,6 +143,7 @@ async function load() {
     cb,
     txCount: txs.length,
     totalRealized,
+    fxUsdtKrw,
   };
 }
 
@@ -214,14 +228,23 @@ export default async function Page() {
         </div>
       </div>
 
-      {/* KRW 메인 (수기 자산 포함). 다른 통화는 거래소 합만 별도 줄로 추가. */}
+      {/* 총자산 (KRW). binance USDT 가치는 FxRate(USDT/KRW) 로 환산해 합산됨. */}
       <div className="mt-2 text-5xl font-semibold">{formatKrw(totalKrw)}</div>
       {Array.from(r.totalsByQuote.entries())
         .filter(([q]) => q !== 'KRW')
         .map(([q, v]) => (
-          <div key={q} className="mt-2 text-2xl text-[var(--muted)]">
-            {formatQuote(v.total, q)}
-            <span className="ml-2 text-xs">(거래소 합)</span>
+          <div key={q} className="mt-2 text-xs text-[var(--muted)]">
+            {formatQuote(v.total, q)} (거래소 합)
+            {r.fxUsdtKrw && q === 'USDT' && (
+              <span className="ml-2">
+                · 환율 {formatKrw(r.fxUsdtKrw.rate)}/USDT (Upbit KRW-USDT)
+              </span>
+            )}
+            {!r.fxUsdtKrw && q === 'USDT' && (
+              <span className="ml-2 text-[var(--negative)]">
+                환율 데이터 없음 — 총자산에서 제외됨
+              </span>
+            )}
           </div>
         ))}
       <div className="mt-2 text-xs text-[var(--muted)]">

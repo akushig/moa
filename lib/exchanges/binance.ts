@@ -10,6 +10,7 @@ import { Decimal } from '@/lib/decimal';
 import { prisma } from '@/lib/db';
 import { binanceAuthFetch as authFetch, BINANCE_API } from './binance-auth';
 import { getAllWalletPositions } from './binance-wallets';
+import { fetchUsdtKrw, persistFxRate } from '@/lib/calc/fx';
 
 export type BinanceBalance = { asset: string; free: string; locked: string };
 
@@ -180,6 +181,19 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
       }));
     if (priceRows.length > 0) {
       await prisma.priceSnapshot.createMany({ data: priceRows });
+    }
+
+    // 6) USDT/KRW 환율 — 대시보드 총자산에 binance USDT 가치 KRW 환산할 때 사용.
+    // 실패해도 snapshot 자체는 OK 로 반환 (warning 만 추가).
+    const fx = await fetchUsdtKrw();
+    if (fx) {
+      try {
+        await persistFxRate(takenAt, 'USDT', 'KRW', fx.rate, fx.source);
+      } catch (e) {
+        walletResult.errors.push(`fx: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      walletResult.errors.push('fx: USDT/KRW 환율 조회 실패 (Upbit KRW-USDT)');
     }
 
     return {
