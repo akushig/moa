@@ -3,7 +3,8 @@ import { serve } from '@hono/node-server';
 import { timingSafeEqual } from 'node:crypto';
 import { getUpbitKrwBreakdown } from './exchanges/upbit.js';
 import { getBithumbKrwBreakdown } from './exchanges/bithumb.js';
-import { getBinanceUsdtBreakdown } from './exchanges/binance.js';
+// Binance 는 Vercel 측 lib/exchanges/binance.ts 가 담당 (한국 region pin).
+// 워커는 GCP us-west1 (미국 region) 이라 Binance HTTP 451 받음.
 import {
   insertSnapshot,
   insertPriceSnapshots,
@@ -105,41 +106,6 @@ app.post('/sync', async (c) => {
         };
       } catch (e) {
         errors.bithumb = e instanceof Error ? e.message : String(e);
-      }
-    })(),
-    (async () => {
-      // Binance — quote=USDT. 키 미설정이면 무시 (옵셔널).
-      if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_SECRET_KEY) return;
-      try {
-        const r = await getBinanceUsdtBreakdown();
-        await insertSnapshot({
-          exchange: 'binance',
-          quoteCurrency: 'USDT',
-          totalKrw: r.totalUsdt.toString(),
-          cashKrw: r.cashUsdt.toString(),
-          cryptoKrw: r.cryptoUsdt.toString(),
-          unpriced: r.unpriced,
-          raw: { holdings: r.holdings },
-        });
-        for (const h of r.holdings) {
-          if (h.priceKrw && h.source === 'usdt_market') {
-            priceSnapshots.push({
-              market: `USDT-${h.currency}`,
-              price: h.priceKrw,
-              source: 'binance',
-            });
-          }
-        }
-        results.binance = {
-          quoteCurrency: 'USDT',
-          total: r.totalUsdt.toString(),
-          cash: r.cashUsdt.toString(),
-          crypto: r.cryptoUsdt.toString(),
-          unpricedCount: r.unpriced.length,
-          holdingsCount: r.holdings.length,
-        };
-      } catch (e) {
-        errors.binance = e instanceof Error ? e.message : String(e);
       }
     })(),
   ]);
