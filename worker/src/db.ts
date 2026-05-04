@@ -87,3 +87,20 @@ export async function upsertTransactions(
   }
   return { inserted, skipped };
 }
+
+// Day 3+ — incremental ingestion 용. (exchange, assetSymbol) 별 마지막
+// 거래 timestamp (epoch ms). 없으면 null → caller 가 첫 ingest 로 backward walk.
+export async function getLatestOrderTimestamp(
+  exchange: 'upbit' | 'bithumb',
+  assetSymbol: string,
+): Promise<number | null> {
+  const r = await db.execute({
+    sql: `SELECT MAX(timestamp) AS ts FROM "Transaction"
+          WHERE source = 'exchange' AND exchange = ? AND assetSymbol = ?`,
+    args: [exchange, assetSymbol],
+  });
+  const v = r.rows[0]?.ts as unknown;
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}

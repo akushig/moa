@@ -3,9 +3,10 @@ import { signBithumbJWT } from './bithumb.js';
 const BITHUMB_API = 'https://api.bithumb.com';
 
 // 빗썸 v2 = 업비트 호환이지만 path 만 다름. closed 분리 endpoint 없고
-// /v1/orders?market=KRW-BTC&state=done&limit=1000 로 통합.
-// 응답 shape 는 업비트 호환 가정 (uuid / side / market / price / volume /
-// executed_volume / paid_fee). 차이 발견 시 normalize 추가.
+// /v1/orders?market=KRW-BTC&state=done&limit=100&page=N 로 통합.
+// time-range 파라미터 없음 → page-based + early stop on cutoff.
+// 응답 shape 는 업비트 호환 (uuid / side / market / price / volume /
+// executed_volume / paid_fee / created_at).
 export type BithumbOrder = {
   uuid: string;
   side: 'bid' | 'ask';
@@ -31,13 +32,20 @@ async function authFetch(path: string, query: Record<string, string>): Promise<R
   });
 }
 
-// 빗썸 v2 limit max 100 (업비트는 1000) → page 페이징.
-// MAX_PAGES 는 v0.1 dogfood safeguard. 1000 건이면 한 종목 거래에 충분.
-const PER_PAGE = 100;
-const MAX_PAGES = 10;
+const PER_PAGE = 100; // 빗썸 v2 limit max 100 (업비트는 1000)
+const MAX_PAGES = 100; // 한 종목 1만 건 안전판
+const SAFETY_OVERLAP_MS = 60 * 60 * 1000;
 
-export async function getBithumbClosedOrders(market: string): Promise<BithumbOrder[]> {
-  const all: BithumbOrder[] = [];
+// since (epoch ms) 가 주어지면 since-1h 이상의 order 까지만 가져오고 stop.
+// 미지정 시 MAX_PAGES 까지 walk (initial backfill).
+export async function getBithumbClosedOrders(
+  market: string,
+  since?: number,
+): Promise<BithumbOrder[]> {
+  const out: BithumbOrder[] = [];
+  const cutoff =
+    since !== undefined && since !== null ? since - SAFETY_OVERLAP_MS : null;
+
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     const res = await authFetch('/v1/orders', {
       market,
@@ -54,8 +62,23 @@ export async function getBithumbClosedOrders(market: string): Promise<BithumbOrd
       throw new Error(`빗썸 orders non-array: ${JSON.stringify(j).slice(0, 200)}`);
     }
     const batch = j as BithumbOrder[];
-    all.push(...batch);
+
+    if (cutoff !== null) {
+      let stopped = false;
+      for (const o of batch) {
+        const ts = new Date(o.created_at).getTime();
+        if (ts < cutoff) {
+          stopped = true;
+          break;
+        }
+        out.push(o);
+      }
+      if (stopped) break;
+    } else {
+      out.push(...batch);
+    }
+
     if (batch.length < PER_PAGE) break;
   }
-  return all;
+  return out;
 }

@@ -3,7 +3,11 @@ import { getUpbitAccounts, getUpbitKrwMarkets } from './exchanges/upbit.js';
 import { getBithumbAccounts, getBithumbKrwMarkets } from './exchanges/bithumb.js';
 import { getUpbitClosedOrders, type UpbitOrder } from './exchanges/upbit-orders.js';
 import { getBithumbClosedOrders, type BithumbOrder } from './exchanges/bithumb-orders.js';
-import { upsertTransactions, type TransactionInput } from './db.js';
+import {
+  upsertTransactions,
+  getLatestOrderTimestamp,
+  type TransactionInput,
+} from './db.js';
 
 // 주어진 closed order → Transaction row.
 // price = null (시장가 주문) 케이스: executed_volume × ??? 알 수 없으므로 paid_fee
@@ -40,31 +44,33 @@ function orderToTransaction(
 export type IngestResult = {
   exchange: 'upbit' | 'bithumb';
   marketsScanned: string[];
+  marketsBackfill: string[]; // 첫 ingest (since=null) 라 backward walk 한 마켓
   ordersFetched: number;
   inserted: number;
   skipped: number;
   errors: string[];
 };
 
-export async function ingestUpbit(): Promise<IngestResult> {
+async function ingest(
+  source: 'upbit' | 'bithumb',
+  fetchMarkets: () => Promise<string[]>,
+  fetchOrders: (market: string, since?: number) => Promise<UpbitOrder[] | BithumbOrder[]>,
+): Promise<IngestResult> {
   const errors: string[] = [];
-  const accounts = await getUpbitAccounts();
-  const krwMarkets = await getUpbitKrwMarkets();
-  // 잔고 0 인 코인도 과거에 거래했을 수 있으므로 모든 KRW 마켓을 훑으면 좋지만
-  // 비용 ↑ → 일단 현재 보유 + KRW 페어 있는 것만. 잔고 sell 다 한 코인은 v0.5+ 보강.
-  const markets = accounts
-    .filter((a) => a.currency !== 'KRW')
-    .map((a) => `KRW-${a.currency}`)
-    .filter((m) => krwMarkets.has(m));
+  const markets = await fetchMarkets();
+  const marketsBackfill: string[] = [];
 
   const all: TransactionInput[] = [];
   let ordersFetched = 0;
   for (const m of markets) {
+    const base = m.slice('KRW-'.length);
     try {
-      const orders = await getUpbitClosedOrders(m);
+      const since = await getLatestOrderTimestamp(source, base);
+      if (since === null) marketsBackfill.push(m);
+      const orders = await fetchOrders(m, since ?? undefined);
       ordersFetched += orders.length;
       for (const o of orders) {
-        const t = orderToTransaction(o, 'upbit');
+        const t = orderToTransaction(o, source);
         if (t) all.push(t);
       }
     } catch (e) {
@@ -73,8 +79,9 @@ export async function ingestUpbit(): Promise<IngestResult> {
   }
   const { inserted, skipped } = await upsertTransactions(all);
   return {
-    exchange: 'upbit',
+    exchange: source,
     marketsScanned: markets,
+    marketsBackfill,
     ordersFetched,
     inserted,
     skipped,
@@ -82,36 +89,33 @@ export async function ingestUpbit(): Promise<IngestResult> {
   };
 }
 
-export async function ingestBithumb(): Promise<IngestResult> {
-  const errors: string[] = [];
-  const accounts = await getBithumbAccounts();
-  const krwMarkets = await getBithumbKrwMarkets();
-  const markets = accounts
-    .filter((a) => a.currency !== 'KRW')
-    .map((a) => `KRW-${a.currency}`)
-    .filter((m) => krwMarkets.has(m));
+export async function ingestUpbit(): Promise<IngestResult> {
+  return ingest(
+    'upbit',
+    async () => {
+      const accounts = await getUpbitAccounts();
+      const krwMarkets = await getUpbitKrwMarkets();
+      // 잔고 0 인 코인은 v0.5+ 에서 별도 처리. 일단 현재 보유 + KRW 마켓만.
+      return accounts
+        .filter((a) => a.currency !== 'KRW')
+        .map((a) => `KRW-${a.currency}`)
+        .filter((m) => krwMarkets.has(m));
+    },
+    getUpbitClosedOrders,
+  );
+}
 
-  const all: TransactionInput[] = [];
-  let ordersFetched = 0;
-  for (const m of markets) {
-    try {
-      const orders = await getBithumbClosedOrders(m);
-      ordersFetched += orders.length;
-      for (const o of orders) {
-        const t = orderToTransaction(o, 'bithumb');
-        if (t) all.push(t);
-      }
-    } catch (e) {
-      errors.push(`${m}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  const { inserted, skipped } = await upsertTransactions(all);
-  return {
-    exchange: 'bithumb',
-    marketsScanned: markets,
-    ordersFetched,
-    inserted,
-    skipped,
-    errors,
-  };
+export async function ingestBithumb(): Promise<IngestResult> {
+  return ingest(
+    'bithumb',
+    async () => {
+      const accounts = await getBithumbAccounts();
+      const krwMarkets = await getBithumbKrwMarkets();
+      return accounts
+        .filter((a) => a.currency !== 'KRW')
+        .map((a) => `KRW-${a.currency}`)
+        .filter((m) => krwMarkets.has(m));
+    },
+    getBithumbClosedOrders,
+  );
 }

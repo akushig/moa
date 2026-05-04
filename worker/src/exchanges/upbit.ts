@@ -16,6 +16,17 @@ export type UpbitAccount = {
 
 export type UpbitTicker = { market: string; trade_price: number };
 
+// Upbit 의 query_hash 검증 알고리즘은 ":" 와 "+" 를 percent-encoding 안 한
+// 형태로 canonical 화한다. URLSearchParams 가 자동으로 %3A / %2B 로 encode
+// 하므로 hash + URL 둘 다 raw 로 후처리해야 일치. (영문/숫자/-/_/. 만 쓰는
+// query 는 영향 없음.)
+export function buildUpbitQs(query: Record<string, string>): string {
+  return new URLSearchParams(query)
+    .toString()
+    .replace(/%3A/g, ':')
+    .replace(/%2B/g, '+');
+}
+
 export async function signUpbitJWT(
   accessKey: string,
   secretKey: string,
@@ -26,7 +37,7 @@ export async function signUpbitJWT(
     nonce: crypto.randomUUID(),
   };
   if (query && Object.keys(query).length > 0) {
-    const queryString = new URLSearchParams(query).toString();
+    const queryString = buildUpbitQs(query);
     const queryHash = crypto.createHash('sha512').update(queryString).digest('hex');
     payload.query_hash = queryHash;
     payload.query_hash_alg = 'SHA512';
