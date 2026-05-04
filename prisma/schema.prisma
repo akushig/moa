@@ -31,6 +31,7 @@ model Transaction {
   timestamp   DateTime
   source      String   // exchange | manual | csv
   exchange    String?  // upbit | bithumb | null
+  externalId  String?  // 거래소 측 uuid — ingestion idempotency key
   assetClass  String   // crypto | stock | cash | loan | realestate
   assetSymbol String   // BTC, KRW, KOSPI:005930, ...
   side        String   // buy | sell | deposit | withdraw | interest | dividend
@@ -41,6 +42,7 @@ model Transaction {
   note        String?
   createdAt   DateTime @default(now())
 
+  @@unique([source, exchange, externalId])
   @@index([assetSymbol, timestamp])
   @@index([source, exchange])
 }

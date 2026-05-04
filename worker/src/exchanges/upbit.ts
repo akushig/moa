@@ -1,6 +1,7 @@
 import { SignJWT } from 'jose';
 import crypto from 'node:crypto';
 import { Decimal } from 'decimal.js';
+import { getUsdKrwRate } from '../fx.js';
 
 const UPBIT_API = 'https://api.upbit.com';
 
@@ -63,13 +64,27 @@ export async function getUpbitKrwMarkets(): Promise<Set<string>> {
   return new Set(arr.filter((m) => m.market.startsWith('KRW-')).map((m) => m.market));
 }
 
-const STABLECOINS = new Set(['USDT', 'USDC', 'BUSD', 'DAI']);
+// 진정한 stablecoin (KRW 마켓 없을 때만 fx fallback). USDT/USDC 는 업비트에
+// KRW 페어가 있으므로 일반 코인처럼 ticker 로 환산 — STABLECOINS set 에서 제외.
+const FX_FALLBACK_TO_USD = new Set(['USDT', 'USDC', 'DAI', 'BUSD']);
+
+// 한 코인의 (현재가) 환산 결과
+export type UpbitHolding = {
+  currency: string;
+  qty: string;
+  avgBuyPrice: string; // 업비트가 알려주는 값 (참고용 — 실제 평균단가는 transactions 기반)
+  unitCurrency: string;
+  priceKrw: string | null; // 현재가 KRW. 환산 못한 경우 null.
+  valueKrw: string | null; // qty × priceKrw
+  source: 'krw_market' | 'fx' | 'unpriced';
+};
 
 export type UpbitKrwBreakdown = {
   totalKrw: Decimal;
   cashKrw: Decimal;
   cryptoKrw: Decimal;
   unpriced: { currency: string; balance: string }[];
+  holdings: UpbitHolding[];
 };
 
 export async function getUpbitKrwBreakdown(): Promise<UpbitKrwBreakdown> {
@@ -79,49 +94,101 @@ export async function getUpbitKrwBreakdown(): Promise<UpbitKrwBreakdown> {
   let cashKrw = new Decimal(0);
   let cryptoKrw = new Decimal(0);
   const unpriced: { currency: string; balance: string }[] = [];
+  const holdings: UpbitHolding[] = [];
 
-  const coinSymbols: string[] = [];
+  // 1) KRW 현금 분리 + 코인 마켓 후보 수집
+  const coinAccounts: UpbitAccount[] = [];
   for (const a of nonZero) {
     if (a.currency === 'KRW') {
       cashKrw = cashKrw.plus(a.balance).plus(a.locked);
-    } else if (STABLECOINS.has(a.currency)) {
-      unpriced.push({
-        currency: a.currency,
-        balance: new Decimal(a.balance).plus(a.locked).toString(),
-      });
-    } else {
-      coinSymbols.push(`KRW-${a.currency}`);
+      continue;
     }
+    coinAccounts.push(a);
   }
 
-  if (coinSymbols.length > 0) {
-    const krwMarkets = await getUpbitKrwMarkets();
-    const tradable = coinSymbols.filter((m) => krwMarkets.has(m));
-    const untradable = coinSymbols.filter((m) => !krwMarkets.has(m));
-    for (const m of untradable) {
-      const sym = m.slice('KRW-'.length);
-      const a = nonZero.find((x) => x.currency === sym)!;
-      unpriced.push({
-        currency: sym,
-        balance: new Decimal(a.balance).plus(a.locked).toString(),
+  if (coinAccounts.length === 0) {
+    return { totalKrw: cashKrw, cashKrw, cryptoKrw, unpriced, holdings };
+  }
+
+  // 2) KRW-XXX 마켓 존재 여부 사전 검증
+  const krwMarkets = await getUpbitKrwMarkets();
+  const tradable = coinAccounts.filter((a) => krwMarkets.has(`KRW-${a.currency}`));
+  const untradable = coinAccounts.filter((a) => !krwMarkets.has(`KRW-${a.currency}`));
+
+  // 3) tradable → ticker 일괄 조회
+  const priceMap = new Map<string, number>();
+  if (tradable.length > 0) {
+    const tickers = await getUpbitTickers(tradable.map((a) => `KRW-${a.currency}`));
+    for (const t of tickers) priceMap.set(t.market, t.trade_price);
+  }
+
+  for (const a of tradable) {
+    const qty = new Decimal(a.balance).plus(a.locked);
+    const price = priceMap.get(`KRW-${a.currency}`);
+    if (price === undefined) {
+      unpriced.push({ currency: a.currency, balance: qty.toString() });
+      holdings.push({
+        currency: a.currency,
+        qty: qty.toString(),
+        avgBuyPrice: a.avg_buy_price,
+        unitCurrency: a.unit_currency,
+        priceKrw: null,
+        valueKrw: null,
+        source: 'unpriced',
       });
+      continue;
     }
-    const tickers = await getUpbitTickers(tradable);
-    const priceMap = new Map(tickers.map((t) => [t.market, t.trade_price]));
-    for (const a of nonZero) {
-      if (a.currency === 'KRW' || STABLECOINS.has(a.currency)) continue;
-      if (!krwMarkets.has(`KRW-${a.currency}`)) continue; // already pushed to unpriced
-      const price = priceMap.get(`KRW-${a.currency}`);
-      if (price === undefined) {
-        unpriced.push({
+    const value = qty.times(price);
+    cryptoKrw = cryptoKrw.plus(value);
+    holdings.push({
+      currency: a.currency,
+      qty: qty.toString(),
+      avgBuyPrice: a.avg_buy_price,
+      unitCurrency: a.unit_currency,
+      priceKrw: new Decimal(price).toString(),
+      valueKrw: value.toString(),
+      source: 'krw_market',
+    });
+  }
+
+  // 4) untradable → stablecoin 이면 fx 로 환산, 그 외는 unpriced
+  let usdKrw: Decimal | null = null;
+  for (const a of untradable) {
+    const qty = new Decimal(a.balance).plus(a.locked);
+    if (FX_FALLBACK_TO_USD.has(a.currency)) {
+      if (usdKrw === null) {
+        try {
+          usdKrw = new Decimal(await getUsdKrwRate());
+        } catch {
+          usdKrw = null;
+        }
+      }
+      if (usdKrw !== null) {
+        const value = qty.times(usdKrw);
+        cryptoKrw = cryptoKrw.plus(value);
+        holdings.push({
           currency: a.currency,
-          balance: new Decimal(a.balance).plus(a.locked).toString(),
+          qty: qty.toString(),
+          avgBuyPrice: a.avg_buy_price,
+          unitCurrency: a.unit_currency,
+          priceKrw: usdKrw.toString(),
+          valueKrw: value.toString(),
+          source: 'fx',
         });
         continue;
       }
-      cryptoKrw = cryptoKrw.plus(new Decimal(a.balance).plus(a.locked).times(price));
     }
+    unpriced.push({ currency: a.currency, balance: qty.toString() });
+    holdings.push({
+      currency: a.currency,
+      qty: qty.toString(),
+      avgBuyPrice: a.avg_buy_price,
+      unitCurrency: a.unit_currency,
+      priceKrw: null,
+      valueKrw: null,
+      source: 'unpriced',
+    });
   }
 
-  return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced };
+  return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced, holdings };
 }

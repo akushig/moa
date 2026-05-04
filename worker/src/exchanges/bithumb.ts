@@ -1,6 +1,7 @@
 import { SignJWT } from 'jose';
 import crypto from 'node:crypto';
 import { Decimal } from 'decimal.js';
+import { getUsdKrwRate } from '../fx.js';
 
 // 빗썸 v2 API:
 //   - JWT Bearer auth (HS256), Authorization 헤더
@@ -75,13 +76,25 @@ export async function getBithumbKrwMarkets(): Promise<Set<string>> {
   const arr = (await res.json()) as { market: string }[];
   return new Set(arr.filter((m) => m.market.startsWith('KRW-')).map((m) => m.market));
 }
-const STABLECOINS = new Set(['USDT', 'USDC', 'BUSD', 'DAI']);
+
+const FX_FALLBACK_TO_USD = new Set(['USDT', 'USDC', 'DAI', 'BUSD']);
+
+export type BithumbHolding = {
+  currency: string;
+  qty: string;
+  avgBuyPrice: string;
+  unitCurrency: string;
+  priceKrw: string | null;
+  valueKrw: string | null;
+  source: 'krw_market' | 'fx' | 'unpriced';
+};
 
 export type BithumbKrwBreakdown = {
   totalKrw: Decimal;
   cashKrw: Decimal;
   cryptoKrw: Decimal;
   unpriced: { currency: string; balance: string }[];
+  holdings: BithumbHolding[];
 };
 
 export async function getBithumbKrwBreakdown(): Promise<BithumbKrwBreakdown> {
@@ -91,49 +104,97 @@ export async function getBithumbKrwBreakdown(): Promise<BithumbKrwBreakdown> {
   let cashKrw = new Decimal(0);
   let cryptoKrw = new Decimal(0);
   const unpriced: { currency: string; balance: string }[] = [];
+  const holdings: BithumbHolding[] = [];
 
-  const coinSymbols: string[] = [];
+  const coinAccounts: BithumbAccount[] = [];
   for (const a of nonZero) {
     if (a.currency === 'KRW') {
       cashKrw = cashKrw.plus(a.balance).plus(a.locked);
-    } else if (STABLECOINS.has(a.currency)) {
-      unpriced.push({
-        currency: a.currency,
-        balance: new Decimal(a.balance).plus(a.locked).toString(),
-      });
-    } else {
-      coinSymbols.push(`KRW-${a.currency}`);
+      continue;
     }
+    coinAccounts.push(a);
   }
 
-  if (coinSymbols.length > 0) {
-    const krwMarkets = await getBithumbKrwMarkets();
-    const tradable = coinSymbols.filter((m) => krwMarkets.has(m));
-    const untradable = coinSymbols.filter((m) => !krwMarkets.has(m));
-    for (const m of untradable) {
-      const sym = m.slice('KRW-'.length);
-      const a = nonZero.find((x) => x.currency === sym)!;
-      unpriced.push({
-        currency: sym,
-        balance: new Decimal(a.balance).plus(a.locked).toString(),
+  if (coinAccounts.length === 0) {
+    return { totalKrw: cashKrw, cashKrw, cryptoKrw, unpriced, holdings };
+  }
+
+  const krwMarkets = await getBithumbKrwMarkets();
+  const tradable = coinAccounts.filter((a) => krwMarkets.has(`KRW-${a.currency}`));
+  const untradable = coinAccounts.filter((a) => !krwMarkets.has(`KRW-${a.currency}`));
+
+  const priceMap = new Map<string, number>();
+  if (tradable.length > 0) {
+    const tickers = await getBithumbTickers(tradable.map((a) => `KRW-${a.currency}`));
+    for (const t of tickers) priceMap.set(t.market, t.trade_price);
+  }
+
+  for (const a of tradable) {
+    const qty = new Decimal(a.balance).plus(a.locked);
+    const price = priceMap.get(`KRW-${a.currency}`);
+    if (price === undefined) {
+      unpriced.push({ currency: a.currency, balance: qty.toString() });
+      holdings.push({
+        currency: a.currency,
+        qty: qty.toString(),
+        avgBuyPrice: a.avg_buy_price,
+        unitCurrency: a.unit_currency,
+        priceKrw: null,
+        valueKrw: null,
+        source: 'unpriced',
       });
+      continue;
     }
-    const tickers = await getBithumbTickers(tradable);
-    const priceMap = new Map(tickers.map((t) => [t.market, t.trade_price]));
-    for (const a of nonZero) {
-      if (a.currency === 'KRW' || STABLECOINS.has(a.currency)) continue;
-      if (!krwMarkets.has(`KRW-${a.currency}`)) continue; // already in unpriced
-      const price = priceMap.get(`KRW-${a.currency}`);
-      if (price === undefined) {
-        unpriced.push({
+    const value = qty.times(price);
+    cryptoKrw = cryptoKrw.plus(value);
+    holdings.push({
+      currency: a.currency,
+      qty: qty.toString(),
+      avgBuyPrice: a.avg_buy_price,
+      unitCurrency: a.unit_currency,
+      priceKrw: new Decimal(price).toString(),
+      valueKrw: value.toString(),
+      source: 'krw_market',
+    });
+  }
+
+  let usdKrw: Decimal | null = null;
+  for (const a of untradable) {
+    const qty = new Decimal(a.balance).plus(a.locked);
+    if (FX_FALLBACK_TO_USD.has(a.currency)) {
+      if (usdKrw === null) {
+        try {
+          usdKrw = new Decimal(await getUsdKrwRate());
+        } catch {
+          usdKrw = null;
+        }
+      }
+      if (usdKrw !== null) {
+        const value = qty.times(usdKrw);
+        cryptoKrw = cryptoKrw.plus(value);
+        holdings.push({
           currency: a.currency,
-          balance: new Decimal(a.balance).plus(a.locked).toString(),
+          qty: qty.toString(),
+          avgBuyPrice: a.avg_buy_price,
+          unitCurrency: a.unit_currency,
+          priceKrw: usdKrw.toString(),
+          valueKrw: value.toString(),
+          source: 'fx',
         });
         continue;
       }
-      cryptoKrw = cryptoKrw.plus(new Decimal(a.balance).plus(a.locked).times(price));
     }
+    unpriced.push({ currency: a.currency, balance: qty.toString() });
+    holdings.push({
+      currency: a.currency,
+      qty: qty.toString(),
+      avgBuyPrice: a.avg_buy_price,
+      unitCurrency: a.unit_currency,
+      priceKrw: null,
+      valueKrw: null,
+      source: 'unpriced',
+    });
   }
 
-  return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced };
+  return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced, holdings };
 }

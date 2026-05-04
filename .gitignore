@@ -11,3 +11,4 @@ prisma/dev.db
 manual_assets.json
 coverage
 .DS_Store
+.claude/

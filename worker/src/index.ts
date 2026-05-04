@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { getUpbitKrwBreakdown } from './exchanges/upbit.js';
 import { getBithumbKrwBreakdown } from './exchanges/bithumb.js';
 import { insertSnapshot } from './db.js';
+import { ingestUpbit, ingestBithumb } from './ingest.js';
 
 const PORT = Number(process.env.PORT ?? '8080');
 const SHARED_SECRET = process.env.WORKER_SHARED_SECRET;
@@ -39,12 +40,14 @@ app.post('/sync', async (c) => {
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
           unpriced: r.unpriced,
+          raw: { holdings: r.holdings },
         });
         results.upbit = {
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
           unpricedCount: r.unpriced.length,
+          holdingsCount: r.holdings.length,
         };
       } catch (e) {
         errors.upbit = e instanceof Error ? e.message : String(e);
@@ -59,18 +62,53 @@ app.post('/sync', async (c) => {
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
           unpriced: r.unpriced,
+          raw: { holdings: r.holdings },
         });
         results.bithumb = {
           totalKrw: r.totalKrw.toString(),
           cashKrw: r.cashKrw.toString(),
           cryptoKrw: r.cryptoKrw.toString(),
           unpricedCount: r.unpriced.length,
+          holdingsCount: r.holdings.length,
         };
       } catch (e) {
         errors.bithumb = e instanceof Error ? e.message : String(e);
       }
     })(),
   ]);
+
+  const took = Date.now() - startedAt;
+  const ok = Object.keys(results).length > 0 && Object.keys(errors).length === 0;
+  return c.json({ ok, took, results, errors });
+});
+
+// Day 3 — 거래 내역 ingestion. /v1/orders/closed → Transaction 테이블.
+// Idempotent (INSERT OR IGNORE on (source, exchange, externalId)).
+app.post('/ingest', async (c) => {
+  if (!authOk(c.req.header('x-moa-secret'))) {
+    return c.json({ ok: false, error: 'unauthorized' }, 401);
+  }
+  const startedAt = Date.now();
+  const results: Record<string, unknown> = {};
+  const errors: Record<string, string> = {};
+
+  const tasks: Promise<void>[] = [
+    (async () => {
+      try {
+        results.upbit = await ingestUpbit();
+      } catch (e) {
+        errors.upbit = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+    (async () => {
+      try {
+        results.bithumb = await ingestBithumb();
+      } catch (e) {
+        errors.bithumb = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+  ];
+  await Promise.all(tasks);
 
   const took = Date.now() - startedAt;
   const ok = Object.keys(results).length > 0 && Object.keys(errors).length === 0;
