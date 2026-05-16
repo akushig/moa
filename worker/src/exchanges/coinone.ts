@@ -1,7 +1,8 @@
 // 코인원 API v2.1
-// Auth: HMAC-SHA256 — X-COINONE-PAYLOAD (base64 JSON) + X-COINONE-SIGNATURE
+// Auth: HMAC-SHA512 — X-COINONE-PAYLOAD (base64 JSON) + X-COINONE-SIGNATURE
+// Nonce: v2.1 = UUID string
 // 잔고: POST /v2.1/account/balance/all
-// 체결내역: GET /v2.1/order/complete_orders (market, page, size)
+// 체결내역: POST /v2.1/order/complete_orders (from_ts/to_ts, 90일 윈도우)
 // Ticker: GET /public/v2/ticker_new/KRW
 
 import crypto from 'node:crypto';
@@ -18,11 +19,11 @@ function signCoinone(
   const fullBody = {
     ...body,
     access_token: accessToken,
-    nonce: Date.now(),
+    nonce: crypto.randomUUID(),
   };
   const payload = Buffer.from(JSON.stringify(fullBody)).toString('base64');
   const signature = crypto
-    .createHmac('sha256', secretKey.toUpperCase())
+    .createHmac('sha512', secretKey.toUpperCase())
     .update(payload)
     .digest('hex');
   return { payload, signature };
