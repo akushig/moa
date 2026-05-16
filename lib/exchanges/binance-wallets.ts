@@ -67,45 +67,86 @@ export async function getFundingAssets(): Promise<WalletPosition[]> {
     .filter((p) => p.qty.gt(0));
 }
 
+export type LoanDebt = {
+  loanCoin: string; // 빌린 코인
+  totalDebt: string; // 갚아야 할 양 (원금 + 누적 이자, loanCoin 단위)
+  collateralCoin: string;
+  currentLTV: string;
+};
+
 // Crypto Loan (Flexible rate) — stable rate 는 Binance 가 retire (-10112).
-// collateral 은 spot 에서 빠진 상태이므로 더해줘야 보유량 일치. 빌린 코인은
-// spot 에 들어오므로 별도 처리 X.
-export async function getLoanCollateral(): Promise<WalletPosition[]> {
-  const out: WalletPosition[] = [];
+// 두 측면 모두 반환:
+//   - collateral: 자산 측. spot 에서 빠진 상태이므로 더해줘야 보유량 일치.
+//   - debts: 부채 측. 빌린 코인은 spot 에 들어와 자산처럼 잡히므로 동일 금액 차감 필요
+//            (안 하면 net worth 가 빌린 양 만큼 과대 평가됨).
+export async function getLoanInfo(): Promise<{
+  collateral: WalletPosition[];
+  debts: LoanDebt[];
+}> {
+  const collateral: WalletPosition[] = [];
+  const debts: LoanDebt[] = [];
   const flex = (await safeFetch('/sapi/v1/loan/flexible/ongoing/orders', {
     current: '1',
     limit: '100',
-  })) as { rows?: { collateralCoin: string; collateralAmount: string }[] } | null;
+  })) as
+    | {
+        rows?: {
+          loanCoin: string;
+          totalDebt: string;
+          collateralCoin: string;
+          collateralAmount: string;
+          currentLTV: string;
+        }[];
+      }
+    | null;
   if (flex?.rows) {
     for (const r of flex.rows) {
-      const qty = new Decimal(r.collateralAmount);
-      if (qty.gt(0)) {
-        out.push({ asset: r.collateralCoin, qty, source: 'loan-flex-collateral' });
+      const colQty = new Decimal(r.collateralAmount);
+      if (colQty.gt(0)) {
+        collateral.push({
+          asset: r.collateralCoin,
+          qty: colQty,
+          source: 'loan-flex-collateral',
+        });
+      }
+      const debt = new Decimal(r.totalDebt);
+      if (debt.gt(0)) {
+        debts.push({
+          loanCoin: r.loanCoin,
+          totalDebt: r.totalDebt,
+          collateralCoin: r.collateralCoin,
+          currentLTV: r.currentLTV,
+        });
       }
     }
   }
-  return out;
+  return { collateral, debts };
 }
 
 // 모든 wallet 병렬 fetch. 개별 endpoint 실패는 errors[] 에 모으고 진행.
 export async function getAllWalletPositions(): Promise<{
   positions: WalletPosition[];
+  loanDebts: LoanDebt[];
   errors: string[];
 }> {
   const errors: string[] = [];
-  const collect = async <T>(label: string, fn: () => Promise<T[]>): Promise<T[]> => {
+  const collect = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
     try {
       return await fn();
     } catch (e) {
       errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
-      return [];
+      return fallback;
     }
   };
   const [flex, locked, funding, loan] = await Promise.all([
-    collect('earn-flex', getEarnFlexible),
-    collect('earn-locked', getEarnLocked),
-    collect('funding', getFundingAssets),
-    collect('loan-collateral', getLoanCollateral),
+    collect('earn-flex', getEarnFlexible, [] as WalletPosition[]),
+    collect('earn-locked', getEarnLocked, [] as WalletPosition[]),
+    collect('funding', getFundingAssets, [] as WalletPosition[]),
+    collect('loan-info', getLoanInfo, { collateral: [] as WalletPosition[], debts: [] as LoanDebt[] }),
   ]);
-  return { positions: [...flex, ...locked, ...funding, ...loan], errors };
+  return {
+    positions: [...flex, ...locked, ...funding, ...loan.collateral],
+    loanDebts: loan.debts,
+    errors,
+  };
 }

@@ -156,6 +156,56 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
     const total = cash.plus(crypto);
     const takenAt = new Date();
 
+    // 3.5) 대출 부채 — loanCoin 단위 → USDT-equiv 환산. dashboard 가 fx 곱해 KRW 차감.
+    //
+    // loan endpoint 가 rate-limit (-10055) 에 자주 걸려서 (일반적인 빈도로도 트리거됨)
+    // 빈 결과 그대로 저장하면 net worth 가 부채 만큼 과대 평가됨. fallback:
+    // loan-info 자체 호출은 성공했지만 빈 결과면 그냥 [] 저장 (실제 대출 없음).
+    // 호출 실패 (errors 에 'loan-info:' 포함) 면 직전 snapshot 의 loanDebts 복사.
+    let loanDebts: {
+      loanCoin: string;
+      totalDebt: string;
+      totalDebtUsdt: string | null;
+      collateralCoin: string;
+      currentLTV: string;
+      stale?: boolean;
+    }[] = walletResult.loanDebts.map((d) => {
+      const debtAmount = new Decimal(d.totalDebt);
+      let debtUsdt: string | null = null;
+      if (USDT_PARITY.has(d.loanCoin)) {
+        debtUsdt = debtAmount.toString();
+      } else {
+        const sym = `${d.loanCoin}USDT`;
+        const p = tradable.has(sym) ? priceMap.get(sym) : undefined;
+        if (p) debtUsdt = debtAmount.times(p).toString();
+      }
+      return {
+        loanCoin: d.loanCoin,
+        totalDebt: d.totalDebt,
+        totalDebtUsdt: debtUsdt,
+        collateralCoin: d.collateralCoin,
+        currentLTV: d.currentLTV,
+      };
+    });
+    const loanFailed = walletResult.errors.some((e) => e.startsWith('loan-info:'));
+    if (loanFailed) {
+      const prev = await prisma.balanceSnapshot.findFirst({
+        where: { exchange: 'binance' },
+        orderBy: { takenAt: 'desc' },
+        select: { rawJson: true },
+      });
+      if (prev?.rawJson) {
+        try {
+          const j = JSON.parse(prev.rawJson) as { loanDebts?: typeof loanDebts };
+          if (Array.isArray(j.loanDebts) && j.loanDebts.length > 0) {
+            loanDebts = j.loanDebts.map((d) => ({ ...d, stale: true }));
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     // 4) BalanceSnapshot insert
     await prisma.balanceSnapshot.create({
       data: {
@@ -166,7 +216,11 @@ export async function syncBinance(): Promise<BinanceSyncResult> {
         cashKrw: cash.toString(),
         cryptoKrw: crypto.toString(),
         unpricedJson: JSON.stringify(unpriced),
-        rawJson: JSON.stringify({ holdings, walletWarnings: walletResult.errors }),
+        rawJson: JSON.stringify({
+          holdings,
+          loanDebts,
+          walletWarnings: walletResult.errors,
+        }),
       },
     });
 

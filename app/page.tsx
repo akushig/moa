@@ -22,12 +22,22 @@ type Holding = {
   source: 'krw_market' | 'usdt_market' | 'fx' | 'parity' | 'unpriced';
 };
 
+type LoanDebtRow = {
+  loanCoin: string;
+  totalDebt: string;
+  totalDebtUsdt: string | null;
+  collateralCoin: string;
+  currentLTV: string;
+  stale?: boolean; // 직전 snapshot 에서 fallback 한 경우
+};
+
 function rowToBreakdown(row: BalanceSnapshot): {
   exchange: string;
   quoteCurrency: string;
   takenAt: Date;
   breakdown: ExchangeBreakdown;
   holdings: Holding[];
+  loanDebts: LoanDebtRow[];
 } {
   const unpriced = (() => {
     try {
@@ -36,13 +46,19 @@ function rowToBreakdown(row: BalanceSnapshot): {
       return [];
     }
   })();
-  const holdings = (() => {
-    if (!row.rawJson) return [];
+  const parsed = (() => {
+    if (!row.rawJson) return { holdings: [] as Holding[], loanDebts: [] as LoanDebtRow[] };
     try {
-      const j = JSON.parse(row.rawJson) as { holdings?: Holding[] };
-      return Array.isArray(j.holdings) ? j.holdings : [];
+      const j = JSON.parse(row.rawJson) as {
+        holdings?: Holding[];
+        loanDebts?: LoanDebtRow[];
+      };
+      return {
+        holdings: Array.isArray(j.holdings) ? j.holdings : [],
+        loanDebts: Array.isArray(j.loanDebts) ? j.loanDebts : [],
+      };
     } catch {
-      return [];
+      return { holdings: [] as Holding[], loanDebts: [] as LoanDebtRow[] };
     }
   })();
   return {
@@ -55,7 +71,8 @@ function rowToBreakdown(row: BalanceSnapshot): {
       cryptoKrw: new Decimal(String(row.cryptoKrw)),
       unpriced,
     },
-    holdings,
+    holdings: parsed.holdings,
+    loanDebts: parsed.loanDebts,
   };
 }
 
@@ -98,7 +115,21 @@ async function load() {
       unpriced: e.breakdown.unpriced,
     });
   }
-  const total = computeTotalAssets(breakdownsForTotal, manual);
+
+  // 거래소 부채 (binance Crypto Loan totalDebt) — USDT-equiv 합산 → KRW 환산.
+  // totalDebtUsdt null (loanCoin USDT 페어 미발견) 항목은 unpricedDebts 로 모음.
+  const allDebts = exchanges.flatMap((e) => e.loanDebts);
+  let exchangeDebtUsdt = new Decimal(0);
+  const unpricedDebts: LoanDebtRow[] = [];
+  for (const d of allDebts) {
+    if (d.totalDebtUsdt) exchangeDebtUsdt = exchangeDebtUsdt.plus(d.totalDebtUsdt);
+    else unpricedDebts.push(d);
+  }
+  const exchangeDebtKrw = fxUsdtKrw
+    ? exchangeDebtUsdt.times(fxUsdtKrw.rate)
+    : new Decimal(0);
+
+  const total = computeTotalAssets(breakdownsForTotal, manual, exchangeDebtKrw);
 
   // quoteCurrency 별 거래소 합계 (분리 표시용).
   const totalsByQuote = new Map<string, { cash: Decimal; crypto: Decimal; total: Decimal }>();
@@ -144,6 +175,10 @@ async function load() {
     txCount: txs.length,
     totalRealized,
     fxUsdtKrw,
+    allDebts,
+    exchangeDebtUsdt,
+    exchangeDebtKrw,
+    unpricedDebts,
   };
 }
 
@@ -257,14 +292,41 @@ export default async function Page() {
 
       <table className="mt-10 w-full text-sm">
         <tbody>
-          <Row label="암호화폐 (KRW 거래소 합)" value={parts.crypto.toString()} />
-          <Row label="현금 (KRW 거래소 합)" value={parts.cashExchange.toString()} />
+          <Row label="암호화폐 (거래소 합, KRW 환산)" value={parts.crypto.toString()} />
+          <Row label="현금 (거래소 합, KRW 환산)" value={parts.cashExchange.toString()} />
           <Row label="현금 (수기)" value={parts.cashManual.toString()} />
           <Row label="부동산 순자산 (전세보증금 - 전세대출)" value={parts.realestateNet.toString()} />
           <Row label="마이너스통장 사용액" value={parts.negativeAccount.toString()} negative />
-          <Row label="대출 잔액" value={parts.loan.toString()} negative />
+          <Row label="대출 잔액 (수기)" value={parts.loan.toString()} negative />
+          {parts.exchangeDebt.gt(0) && (
+            <Row
+              label="거래소 부채 (Binance Crypto Loan)"
+              value={parts.exchangeDebt.toString()}
+              negative
+            />
+          )}
         </tbody>
       </table>
+      {r.allDebts.length > 0 && (
+        <p className="mt-2 text-[10px] text-[var(--muted)]">
+          빌린 코인:{' '}
+          {r.allDebts
+            .map(
+              (d) =>
+                `${d.totalDebt} ${d.loanCoin}` +
+                (d.collateralCoin ? ` (담보 ${d.collateralCoin}, LTV ${d.currentLTV})` : ''),
+            )
+            .join(' · ')}
+          {r.allDebts.some((d) => d.stale) && (
+            <span> · <span className="text-[var(--muted)]">대출 endpoint rate limit 으로 직전 snapshot 사용</span></span>
+          )}
+          {r.unpricedDebts.length > 0 && (
+            <span className="text-[var(--negative)]">
+              {' '}· 미환산 부채 {r.unpricedDebts.length}건 (USDT 페어 없음)
+            </span>
+          )}
+        </p>
+      )}
 
       {holdingRows.length > 0 && (
         <section className="mt-12">
