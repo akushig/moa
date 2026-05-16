@@ -14,7 +14,7 @@ import {
   type BithumbTransfer,
 } from './exchanges/bithumb-transfers.js';
 import { getCoinoneCompleteOrders, type CoinoneOrder } from './exchanges/coinone-orders.js';
-import { getKorbitFilledOrders, type KorbitOrder } from './exchanges/korbit-orders.js';
+import { getKorbitMyTrades, type KorbitTrade } from './exchanges/korbit-orders.js';
 import {
   upsertTransactions,
   getLatestOrderTimestamp,
@@ -266,7 +266,7 @@ export async function ingestCoinone(): Promise<IngestResult> {
   };
 }
 
-// 코빗 ingest — orders
+// 코빗 ingest — myTrades (36시간 제한, 자주 poll 필요)
 export async function ingestKorbit(): Promise<IngestResult> {
   const errors: string[] = [];
   const all: TransactionInput[] = [];
@@ -277,34 +277,32 @@ export async function ingestKorbit(): Promise<IngestResult> {
   const { getKorbitKrwBreakdown, getKorbitTickers } = await import('./exchanges/korbit.js');
   const breakdown = await getKorbitKrwBreakdown();
   const currencies = breakdown.holdings.map((h) => h.currency.toLowerCase());
-  // 코빗 currency_pair 형태: btc_krw
   const tickers = await getKorbitTickers();
 
   for (const cur of currencies) {
-    const pair = `${cur}_krw`;
+    const symbol = `${cur}_krw`;
     const market = `KRW-${cur.toUpperCase()}`;
     marketsScanned.push(market);
-    // 코빗에 마켓이 없으면 skip
     if (!tickers.has(cur.toUpperCase())) continue;
     try {
       const since = await getLatestOrderTimestamp('korbit', cur.toUpperCase());
       if (since === null) marketsBackfill.push(market);
-      const orders = await getKorbitFilledOrders(pair, since ?? undefined);
-      ordersFetched += orders.length;
-      for (const o of orders) {
-        const qty = new Decimal(o.order_amount);
+      const trades = await getKorbitMyTrades(symbol, since ?? undefined);
+      ordersFetched += trades.length;
+      for (const t of trades) {
+        const qty = new Decimal(t.filledQty);
         if (qty.lte(0)) continue;
         all.push({
-          timestamp: Number(o.created_at),
+          timestamp: Number(t.createdAt),
           source: 'exchange',
           exchange: 'korbit',
-          externalId: o.id,
+          externalId: t.orderId,
           assetClass: 'crypto',
           assetSymbol: cur.toUpperCase(),
-          side: o.side === 'bid' ? 'buy' : 'sell',
+          side: t.side === 'buy' ? 'buy' : 'sell',
           qty: qty.toString(),
-          price: o.avg_price,
-          fee: o.fee ?? '0',
+          price: t.avgPrice,
+          fee: '0', // v2 myTrades 응답에 fee 별도 없음 — filledAmt 에 포함
           currency: 'KRW',
           note: null,
         });

@@ -143,7 +143,7 @@ app.post('/sync', async (c) => {
     })(),
     // 코빗 — env 미설정 시 silent skip
     (async () => {
-      if (!process.env.KORBIT_CLIENT_ID) return;
+      if (!process.env.KORBIT_API_KEY) return;
       try {
         const r = await getKorbitKrwBreakdown();
         await insertSnapshot({
@@ -236,7 +236,7 @@ app.post('/ingest', async (c) => {
     })(),
     // 코빗 — env 미설정 시 silent skip
     (async () => {
-      if (!process.env.KORBIT_CLIENT_ID) return;
+      if (!process.env.KORBIT_API_KEY) return;
       try {
         results.korbit = await ingestKorbit();
       } catch (e) {

@@ -1,54 +1,46 @@
-// 코빗 API
-// Auth: OAuth2 client_credentials → Bearer token
-// 잔고: GET /v1/user/balances
-// 체결내역: GET /v1/user/orders?status=filled
-// Ticker: GET /v1/ticker/detailed/all
+// 코빗 API v2
+// Auth: HMAC-SHA256 — X-KAPI-KEY 헤더 + signature 파라미터
+// 잔고: GET /v2/balance
+// 체결내역: GET /v2/myTrades (36시간 제한 — 자주 poll 필요)
+// Ticker: GET /v2/ticker?symbol=btc_krw
 
+import crypto from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import { getUsdKrwRate } from '../fx.js';
 
 const KORBIT_API = 'https://api.korbit.co.kr';
 
-let tokenCache: { token: string; expiresAt: number } | null = null;
-
-async function getKorbitToken(): Promise<string> {
-  const clientId = process.env.KORBIT_CLIENT_ID;
-  const clientSecret = process.env.KORBIT_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error('KORBIT_CLIENT_ID / KORBIT_CLIENT_SECRET not set');
-
-  if (tokenCache && tokenCache.expiresAt > Date.now()) return tokenCache.token;
-
-  const res = await fetch(`${KORBIT_API}/v1/oauth2/access_token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'client_credentials',
-    }),
-  });
-  if (!res.ok) throw new Error(`코빗 oauth ${res.status}: ${await res.text()}`);
-  const json = (await res.json()) as { access_token: string; expires_in: number };
-  tokenCache = {
-    token: json.access_token,
-    expiresAt: Date.now() + json.expires_in * 1000 - 60_000,
-  };
-  return tokenCache.token;
+function signKorbit(
+  secret: string,
+  params: URLSearchParams,
+): string {
+  return crypto
+    .createHmac('sha256', secret)
+    .update(params.toString(), 'utf-8')
+    .digest('hex');
 }
 
-async function korbitGet<T>(path: string): Promise<T> {
-  const token = await getKorbitToken();
-  const res = await fetch(`${KORBIT_API}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
+async function korbitGet<T>(
+  path: string,
+  extraParams?: Record<string, string>,
+): Promise<T> {
+  const apiKey = process.env.KORBIT_API_KEY;
+  const apiSecret = process.env.KORBIT_API_SECRET;
+  if (!apiKey || !apiSecret) throw new Error('KORBIT_API_KEY / KORBIT_API_SECRET not set');
+
+  const params = new URLSearchParams({
+    ...extraParams,
+    timestamp: Date.now().toString(),
+  });
+  const signature = signKorbit(apiSecret, params);
+  params.append('signature', signature);
+
+  const res = await fetch(`${KORBIT_API}${path}?${params}`, {
+    headers: { 'X-KAPI-KEY': apiKey },
   });
   if (!res.ok) throw new Error(`코빗 ${path} ${res.status}: ${await res.text()}`);
   return (await res.json()) as T;
 }
-
-type KorbitBalances = Record<
-  string,
-  { available: string; trade_in_use: string; withdrawal_in_use: string }
->;
 
 export type KorbitHolding = {
   currency: string;
@@ -68,24 +60,68 @@ export type KorbitKrwBreakdown = {
   holdings: KorbitHolding[];
 };
 
-type TickerAll = Record<string, { last: string }>;
+type BalanceResponse = {
+  balance: { currency: string; value: string }[];
+  pendingOrders?: { currency: string; value: string }[];
+};
+
+// 코빗 ticker — 개별 심볼 조회 (all 엔드포인트 없음)
+async function getKorbitPrice(symbol: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${KORBIT_API}/v2/ticker?symbol=${symbol}`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { last?: string };
+    return json.last ? Number(json.last) : null;
+  } catch {
+    return null;
+  }
+}
+
+// 코빗에서 거래 가능한 심볼 목록 (public)
+let cachedSymbols: string[] | null = null;
+async function getKorbitSymbols(): Promise<string[]> {
+  if (cachedSymbols) return cachedSymbols;
+  try {
+    const res = await fetch(`${KORBIT_API}/v2/ticker?symbol=all`);
+    if (!res.ok) return [];
+    const json = (await res.json()) as Record<string, unknown>;
+    cachedSymbols = Object.keys(json).filter((k) => k.endsWith('_krw'));
+    return cachedSymbols;
+  } catch {
+    return [];
+  }
+}
 
 export async function getKorbitTickers(): Promise<Map<string, number>> {
-  const res = await fetch(`${KORBIT_API}/v1/ticker/detailed/all`);
-  if (!res.ok) throw new Error(`코빗 ticker ${res.status}: ${await res.text()}`);
-  const json = (await res.json()) as TickerAll;
+  const symbols = await getKorbitSymbols();
   const map = new Map<string, number>();
-  // key = "btc_krw", "eth_krw" etc.
-  for (const [pair, v] of Object.entries(json)) {
-    if (!pair.endsWith('_krw')) continue;
-    const coin = pair.replace('_krw', '').toUpperCase();
-    map.set(coin, Number(v.last));
+  // 병렬로 ticker 조회 (rate limit 5/s 이므로 chunk)
+  const CHUNK = 5;
+  for (let i = 0; i < symbols.length; i += CHUNK) {
+    const batch = symbols.slice(i, i + CHUNK);
+    const results = await Promise.all(batch.map((s) => getKorbitPrice(s)));
+    for (let j = 0; j < batch.length; j++) {
+      if (results[j] !== null) {
+        const coin = batch[j].replace('_krw', '').toUpperCase();
+        map.set(coin, results[j]!);
+      }
+    }
   }
   return map;
 }
 
 export async function getKorbitKrwBreakdown(): Promise<KorbitKrwBreakdown> {
-  const balances = await korbitGet<KorbitBalances>('/v1/user/balances');
+  const balRes = await korbitGet<BalanceResponse>('/v2/balance');
+  const balances = balRes.balance ?? [];
+  const pending = balRes.pendingOrders ?? [];
+
+  // pending orders 도 합산 (잔고에서 빠진 상태)
+  const combined = new Map<string, Decimal>();
+  for (const b of [...balances, ...pending]) {
+    const cur = b.currency.toUpperCase();
+    const prev = combined.get(cur) ?? new Decimal(0);
+    combined.set(cur, prev.plus(b.value));
+  }
 
   let cashKrw = new Decimal(0);
   let cryptoKrw = new Decimal(0);
@@ -94,14 +130,13 @@ export async function getKorbitKrwBreakdown(): Promise<KorbitKrwBreakdown> {
   const FX_FALLBACK = new Set(['USDT', 'USDC', 'DAI', 'BUSD']);
 
   const coinAccounts: { currency: string; qty: Decimal }[] = [];
-  for (const [cur, bal] of Object.entries(balances)) {
-    const qty = new Decimal(bal.available).plus(bal.trade_in_use).plus(bal.withdrawal_in_use);
+  for (const [cur, qty] of combined) {
     if (qty.lte(0)) continue;
-    if (cur.toLowerCase() === 'krw') {
+    if (cur === 'KRW') {
       cashKrw = cashKrw.plus(qty);
       continue;
     }
-    coinAccounts.push({ currency: cur.toUpperCase(), qty });
+    coinAccounts.push({ currency: cur, qty });
   }
 
   if (coinAccounts.length === 0) {
@@ -132,15 +167,7 @@ export async function getKorbitKrwBreakdown(): Promise<KorbitKrwBreakdown> {
       if (usdKrw) {
         const value = a.qty.times(usdKrw);
         cryptoKrw = cryptoKrw.plus(value);
-        holdings.push({
-          currency: a.currency,
-          qty: a.qty.toString(),
-          avgBuyPrice: '0',
-          unitCurrency: 'KRW',
-          priceKrw: usdKrw.toString(),
-          valueKrw: value.toString(),
-          source: 'fx',
-        });
+        holdings.push({ currency: a.currency, qty: a.qty.toString(), avgBuyPrice: '0', unitCurrency: 'KRW', priceKrw: usdKrw.toString(), valueKrw: value.toString(), source: 'fx' });
       } else {
         unpriced.push({ currency: a.currency, balance: a.qty.toString() });
         holdings.push({ currency: a.currency, qty: a.qty.toString(), avgBuyPrice: '0', unitCurrency: 'KRW', priceKrw: null, valueKrw: null, source: 'unpriced' });
@@ -152,32 +179,4 @@ export async function getKorbitKrwBreakdown(): Promise<KorbitKrwBreakdown> {
   }
 
   return { totalKrw: cashKrw.plus(cryptoKrw), cashKrw, cryptoKrw, unpriced, holdings };
-}
-
-// 체결내역 — Transaction insert 용
-export type KorbitOrder = {
-  id: string;
-  currency_pair: string; // btc_krw
-  side: 'bid' | 'ask'; // bid=매수, ask=매도
-  avg_price: string;
-  filled_amount: string;
-  fee: string;
-  created_at: string; // epoch ms
-};
-
-export async function getKorbitFilledOrders(
-  currencyPair: string,
-): Promise<KorbitOrder[]> {
-  const orders: KorbitOrder[] = [];
-  let offset = 0;
-  const limit = 40;
-  for (let page = 0; page < 100; page++) {
-    const json = await korbitGet<KorbitOrder[]>(
-      `/v1/user/orders?currency_pair=${currencyPair}&status=filled&limit=${limit}&offset=${offset}`,
-    );
-    orders.push(...json);
-    if (json.length < limit) break;
-    offset += limit;
-  }
-  return orders;
 }
