@@ -12,26 +12,27 @@
     "db:push": "prisma db push"
   },
   "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "@prisma/adapter-libsql": "^6.0.0",
+    "@prisma/client": "^6.0.0",
+    "decimal.js": "^10.4.3",
+    "jose": "^5.9.6",
     "next": "^16.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "@prisma/client": "^6.0.0",
-    "@prisma/adapter-libsql": "^6.0.0",
-    "@libsql/client": "^0.14.0",
-    "decimal.js": "^10.4.3",
-    "jose": "^5.9.6",
+    "recharts": "^3.8.1",
     "undici": "^7.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "tailwindcss": "^4.0.0",
-    "@tailwindcss/postcss": "^4.0.0",
+    "@vitest/ui": "^2.1.0",
     "postcss": "^8.5.0",
     "prisma": "^6.0.0",
-    "vitest": "^2.1.0",
-    "@vitest/ui": "^2.1.0"
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   }
 }

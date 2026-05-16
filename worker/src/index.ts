@@ -3,6 +3,8 @@ import { serve } from '@hono/node-server';
 import { timingSafeEqual } from 'node:crypto';
 import { getUpbitKrwBreakdown } from './exchanges/upbit.js';
 import { getBithumbKrwBreakdown } from './exchanges/bithumb.js';
+import { getCoinoneKrwBreakdown } from './exchanges/coinone.js';
+import { getKorbitKrwBreakdown } from './exchanges/korbit.js';
 // Binance 는 Vercel 측 lib/exchanges/binance.ts 가 담당 (한국 region pin).
 // 워커는 GCP us-west1 (미국 region) 이라 Binance HTTP 451 받음.
 import {
@@ -11,7 +13,7 @@ import {
   insertFxRate,
   type PriceSnapshotInput,
 } from './db.js';
-import { ingestUpbit, ingestBithumb } from './ingest.js';
+import { ingestUpbit, ingestBithumb, ingestCoinone, ingestKorbit } from './ingest.js';
 
 const PORT = Number(process.env.PORT ?? '8080');
 const SHARED_SECRET = process.env.WORKER_SHARED_SECRET;
@@ -108,6 +110,68 @@ app.post('/sync', async (c) => {
         errors.bithumb = e instanceof Error ? e.message : String(e);
       }
     })(),
+    // 코인원 — env 미설정 시 silent skip
+    (async () => {
+      if (!process.env.COINONE_ACCESS_TOKEN) return;
+      try {
+        const r = await getCoinoneKrwBreakdown();
+        await insertSnapshot({
+          exchange: 'coinone',
+          quoteCurrency: 'KRW',
+          totalKrw: r.totalKrw.toString(),
+          cashKrw: r.cashKrw.toString(),
+          cryptoKrw: r.cryptoKrw.toString(),
+          unpriced: r.unpriced,
+          raw: { holdings: r.holdings },
+        });
+        for (const h of r.holdings) {
+          if (h.priceKrw) {
+            priceSnapshots.push({ market: `KRW-${h.currency}`, price: h.priceKrw, source: 'coinone' });
+          }
+        }
+        results.coinone = {
+          quoteCurrency: 'KRW',
+          total: r.totalKrw.toString(),
+          cash: r.cashKrw.toString(),
+          crypto: r.cryptoKrw.toString(),
+          unpricedCount: r.unpriced.length,
+          holdingsCount: r.holdings.length,
+        };
+      } catch (e) {
+        errors.coinone = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+    // 코빗 — env 미설정 시 silent skip
+    (async () => {
+      if (!process.env.KORBIT_CLIENT_ID) return;
+      try {
+        const r = await getKorbitKrwBreakdown();
+        await insertSnapshot({
+          exchange: 'korbit',
+          quoteCurrency: 'KRW',
+          totalKrw: r.totalKrw.toString(),
+          cashKrw: r.cashKrw.toString(),
+          cryptoKrw: r.cryptoKrw.toString(),
+          unpriced: r.unpriced,
+          raw: { holdings: r.holdings },
+        });
+        for (const h of r.holdings) {
+          if (h.priceKrw) {
+            priceSnapshots.push({ market: `KRW-${h.currency}`, price: h.priceKrw, source: 'korbit' });
+          }
+        }
+        results.korbit = {
+          quoteCurrency: 'KRW',
+          total: r.totalKrw.toString(),
+          cash: r.cashKrw.toString(),
+          crypto: r.cryptoKrw.toString(),
+          unpricedCount: r.unpriced.length,
+          holdingsCount: r.holdings.length,
+        };
+      } catch (e) {
+        errors.korbit = e instanceof Error ? e.message : String(e);
+      }
+    })(),
   ]);
 
   // PriceSnapshot 일괄 적재 (동일 takenAt)
@@ -159,6 +223,24 @@ app.post('/ingest', async (c) => {
         results.bithumb = await ingestBithumb();
       } catch (e) {
         errors.bithumb = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+    // 코인원 — env 미설정 시 silent skip
+    (async () => {
+      if (!process.env.COINONE_ACCESS_TOKEN) return;
+      try {
+        results.coinone = await ingestCoinone();
+      } catch (e) {
+        errors.coinone = e instanceof Error ? e.message : String(e);
+      }
+    })(),
+    // 코빗 — env 미설정 시 silent skip
+    (async () => {
+      if (!process.env.KORBIT_CLIENT_ID) return;
+      try {
+        results.korbit = await ingestKorbit();
+      } catch (e) {
+        errors.korbit = e instanceof Error ? e.message : String(e);
       }
     })(),
   ];

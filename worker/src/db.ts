@@ -7,7 +7,7 @@ if (!url) throw new Error('TURSO_DATABASE_URL not set');
 export const db = createClient({ url, authToken });
 
 export type SnapshotInput = {
-  exchange: 'upbit' | 'bithumb' | 'binance';
+  exchange: string;
   quoteCurrency: 'KRW' | 'USDT' | 'USDC' | string;
   // 컬럼명은 legacy 'Krw' 지만 단위는 quoteCurrency 통화. binance=USDT.
   totalKrw: string;
@@ -39,7 +39,7 @@ export async function insertSnapshot(s: SnapshotInput): Promise<void> {
 export type TransactionInput = {
   timestamp: number; // epoch ms
   source: 'exchange' | 'manual' | 'csv';
-  exchange?: 'upbit' | 'bithumb' | null;
+  exchange?: string | null;
   externalId?: string | null;
   assetClass: 'crypto' | 'stock' | 'cash' | 'loan' | 'realestate';
   assetSymbol: string;
@@ -94,7 +94,7 @@ export async function upsertTransactions(
 // Day 3+ — incremental ingestion 용. (exchange, assetSymbol) 별 마지막
 // 거래 timestamp (epoch ms). 없으면 null → caller 가 첫 ingest 로 backward walk.
 export async function getLatestOrderTimestamp(
-  exchange: 'upbit' | 'bithumb',
+  exchange: string,
   assetSymbol: string,
 ): Promise<number | null> {
   return latestTimestamp(exchange, assetSymbol, ['buy', 'sell']);
@@ -104,7 +104,7 @@ export async function getLatestOrderTimestamp(
 // API 라 코인별 since 보다는 전체 since 가 더 단순. 안전 마진 1시간 overlap 으로
 // fetcher 가 cover.
 export async function getLatestTransferTimestamp(
-  exchange: 'upbit' | 'bithumb',
+  exchange: string,
 ): Promise<number | null> {
   return latestTimestamp(exchange, null, ['deposit', 'withdraw']);
 }

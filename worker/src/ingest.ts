@@ -13,6 +13,8 @@ import {
   getBithumbWithdraws,
   type BithumbTransfer,
 } from './exchanges/bithumb-transfers.js';
+import { getCoinoneCompleteOrders, type CoinoneOrder } from './exchanges/coinone-orders.js';
+import { getKorbitFilledOrders, type KorbitOrder } from './exchanges/korbit-orders.js';
 import {
   upsertTransactions,
   getLatestOrderTimestamp,
@@ -25,7 +27,7 @@ import { getHistoricalPriceAt } from './historical-prices.js';
 // per-unit price = executed_funds / executed_volume (모든 ord_type 에서 정확).
 function orderToTransaction(
   o: UpbitOrder | BithumbOrder,
-  exchange: 'upbit' | 'bithumb',
+  exchange: string,
 ): TransactionInput | null {
   const executed = new Decimal(o.executed_volume ?? '0');
   if (executed.lte(0)) return null;
@@ -61,7 +63,7 @@ function orderToTransaction(
 //     fair-value 정의와 일치해서 평균단가 매칭됨.
 async function transferToTransaction(
   t: UpbitTransfer | BithumbTransfer,
-  exchange: 'upbit' | 'bithumb',
+  exchange: string,
 ): Promise<TransactionInput | null> {
   if (t.currency === 'KRW') return null;
   const validStates = new Set(['DONE', 'ACCEPTED', 'DEPOSIT_ACCEPTED']);
@@ -97,7 +99,7 @@ async function transferToTransaction(
 }
 
 export type IngestResult = {
-  exchange: 'upbit' | 'bithumb';
+  exchange: string;
   marketsScanned: string[];
   marketsBackfill: string[];
   ordersFetched: number;
@@ -108,7 +110,7 @@ export type IngestResult = {
 };
 
 async function ingest(
-  source: 'upbit' | 'bithumb',
+  source: string,
   fetchMarkets: () => Promise<string[]>,
   fetchOrders: (market: string, since?: number) => Promise<UpbitOrder[] | BithumbOrder[]>,
   fetchDeposits: (since?: number) => Promise<UpbitTransfer[] | BithumbTransfer[]>,
@@ -205,4 +207,122 @@ export async function ingestBithumb(): Promise<IngestResult> {
     getBithumbDeposits,
     getBithumbWithdraws,
   );
+}
+
+// 코인원 ingest — orders 만 (deposit/withdraw API 는 v2.1 에 없음, v0.5+ 추가)
+export async function ingestCoinone(): Promise<IngestResult> {
+  const errors: string[] = [];
+  const all: TransactionInput[] = [];
+  let ordersFetched = 0;
+  const marketsScanned: string[] = [];
+  const marketsBackfill: string[] = [];
+
+  // 코인원은 시장 목록을 balance 에서 추론 (잔고 있는 코인만)
+  const { getCoinoneKrwBreakdown } = await import('./exchanges/coinone.js');
+  const breakdown = await getCoinoneKrwBreakdown();
+  const currencies = breakdown.holdings.map((h) => h.currency);
+
+  for (const cur of currencies) {
+    const market = `KRW-${cur}`;
+    marketsScanned.push(market);
+    try {
+      const since = await getLatestOrderTimestamp('coinone', cur);
+      if (since === null) marketsBackfill.push(market);
+      const orders = await getCoinoneCompleteOrders(cur, since ?? undefined);
+      ordersFetched += orders.length;
+      for (const o of orders) {
+        const qty = new Decimal(o.qty);
+        if (qty.lte(0)) continue;
+        all.push({
+          timestamp: Number(o.timestamp),
+          source: 'exchange',
+          exchange: 'coinone',
+          externalId: o.order_id,
+          assetClass: 'crypto',
+          assetSymbol: o.target_currency.toUpperCase(),
+          side: o.type === 'buy' ? 'buy' : 'sell',
+          qty: qty.toString(),
+          price: o.price,
+          fee: o.fee ?? '0',
+          currency: (o.quote_currency ?? 'KRW').toUpperCase(),
+          note: null,
+        });
+      }
+    } catch (e) {
+      errors.push(`${market}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  const { inserted, skipped } = await upsertTransactions(all);
+  return {
+    exchange: 'coinone',
+    marketsScanned,
+    marketsBackfill,
+    ordersFetched,
+    transfersFetched: 0,
+    inserted,
+    skipped,
+    errors,
+  };
+}
+
+// 코빗 ingest — orders
+export async function ingestKorbit(): Promise<IngestResult> {
+  const errors: string[] = [];
+  const all: TransactionInput[] = [];
+  let ordersFetched = 0;
+  const marketsScanned: string[] = [];
+  const marketsBackfill: string[] = [];
+
+  const { getKorbitKrwBreakdown, getKorbitTickers } = await import('./exchanges/korbit.js');
+  const breakdown = await getKorbitKrwBreakdown();
+  const currencies = breakdown.holdings.map((h) => h.currency.toLowerCase());
+  // 코빗 currency_pair 형태: btc_krw
+  const tickers = await getKorbitTickers();
+
+  for (const cur of currencies) {
+    const pair = `${cur}_krw`;
+    const market = `KRW-${cur.toUpperCase()}`;
+    marketsScanned.push(market);
+    // 코빗에 마켓이 없으면 skip
+    if (!tickers.has(cur.toUpperCase())) continue;
+    try {
+      const since = await getLatestOrderTimestamp('korbit', cur.toUpperCase());
+      if (since === null) marketsBackfill.push(market);
+      const orders = await getKorbitFilledOrders(pair, since ?? undefined);
+      ordersFetched += orders.length;
+      for (const o of orders) {
+        const qty = new Decimal(o.order_amount);
+        if (qty.lte(0)) continue;
+        all.push({
+          timestamp: Number(o.created_at),
+          source: 'exchange',
+          exchange: 'korbit',
+          externalId: o.id,
+          assetClass: 'crypto',
+          assetSymbol: cur.toUpperCase(),
+          side: o.side === 'bid' ? 'buy' : 'sell',
+          qty: qty.toString(),
+          price: o.avg_price,
+          fee: o.fee ?? '0',
+          currency: 'KRW',
+          note: null,
+        });
+      }
+    } catch (e) {
+      errors.push(`${market}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  const { inserted, skipped } = await upsertTransactions(all);
+  return {
+    exchange: 'korbit',
+    marketsScanned,
+    marketsBackfill,
+    ordersFetched,
+    transfersFetched: 0,
+    inserted,
+    skipped,
+    errors,
+  };
 }

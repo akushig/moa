@@ -7,6 +7,8 @@ import { groupCostBasis } from '@/lib/calc/cost-basis';
 import { getLatestFxRate } from '@/lib/calc/fx';
 import { formatKrw, formatQuote } from '@/lib/decimal';
 import { SyncButton } from './sync-button';
+import { AssetChart } from './components/asset-chart';
+import { AllocationChart } from './components/allocation-chart';
 
 export const dynamic = 'force-dynamic';
 
@@ -80,7 +82,7 @@ async function load() {
   const [snapshots, txs, manualRaw, fxUsdtKrw] = await Promise.all([
     // 거래소별 최신 1행 (group by 후 max id) — Prisma 가 raw 안 써도 가능하지만 단순 N+1.
     Promise.all(
-      ['upbit', 'bithumb', 'binance'].map((ex) =>
+      ['upbit', 'bithumb', 'binance', 'coinone', 'korbit'].map((ex) =>
         prisma.balanceSnapshot.findFirst({
           where: { exchange: ex },
           orderBy: { takenAt: 'desc' },
@@ -257,7 +259,10 @@ export default async function Page() {
         <h1 className="text-sm text-[var(--muted)] uppercase tracking-wider">총자산</h1>
         <div className="flex gap-2 items-center">
           <a href="/asset" className="text-xs text-[var(--muted)] hover:text-white">
-            특정 시점 조회
+            시점 조회
+          </a>
+          <a href="/stock" className="text-xs text-[var(--muted)] hover:text-white">
+            주식 CSV
           </a>
           <SyncButton />
         </div>
@@ -326,6 +331,22 @@ export default async function Page() {
             </span>
           )}
         </p>
+      )}
+
+      {/* 자산 추이 차트 + 배분 차트 */}
+      {haveAnySnapshot && (
+        <section className="mt-10 grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-6">
+          <AssetChart />
+          <AllocationChart parts={JSON.parse(JSON.stringify({
+            crypto: parts.crypto.toNumber(),
+            cashExchange: parts.cashExchange.toNumber(),
+            cashManual: parts.cashManual.toNumber(),
+            realestateNet: parts.realestateNet.toNumber(),
+            negativeAccount: parts.negativeAccount.toNumber(),
+            loan: parts.loan.toNumber(),
+            exchangeDebt: parts.exchangeDebt.toNumber(),
+          }))} />
+        </section>
       )}
 
       {holdingRows.length > 0 && (

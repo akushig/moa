@@ -76,10 +76,13 @@ async function fetchCandle(
 
 // deposit 시점 historical 가격. 1분봉 우선, 실패 시 일봉 종가 fallback.
 export async function getHistoricalPriceAt(
-  source: 'upbit' | 'bithumb',
+  source: string,
   market: string, // KRW-SOL
   timestampMs: number,
 ): Promise<string | null> {
+  // 코인원/코빗은 candle API 형태가 다름. upbit API 형태 (v1 candles) 를 공유하는
+  // 거래소만 지원. 나머지는 null 반환 → deposit price = 0 (cost-basis skip).
+  if (source !== 'upbit' && source !== 'bithumb') return null;
   const base = source === 'upbit' ? 'https://api.upbit.com' : 'https://api.bithumb.com';
 
   // 1) 1분봉
